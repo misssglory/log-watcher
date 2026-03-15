@@ -70,6 +70,6 @@ pub fn render(frame: &mut Frame, app: &App) {
     };
 
     let footer = Paragraph::new(footer)
-        .block(Block::default().borders(Borders::ALL).title(Span::styled("Hotkeys", Style::default().fg(Color::Cyan))));
+        .block(Block::default().borders(Borders::empty()).title(Span::styled("Hotkeys", Style::default().fg(Color::Cyan))));
     frame.render_widget(footer, chunks[2]);
 }
