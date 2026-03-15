@@ -1,0 +1,19 @@
+[package]
+name = "log-watcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+crossterm = "0.28"
+ratatui = "0.29"
+regex = "1"
+notify = "6"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true        # Link Time Optimization for smaller/faster binary.
+# codegen-units = 1 # Slower compilation, better optimization.
+panic = "abort"   # Reduces binary size (no unwinding).
+strip = "symbols"
