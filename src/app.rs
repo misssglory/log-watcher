@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, time::Instant};
+use std::{fs, path::PathBuf, sync::OnceLock, time::Instant};
 
 use anyhow::Result;
 use regex::Regex;
@@ -6,7 +6,10 @@ use regex::Regex;
 use crate::{
     file_source,
     filter,
-    model::{App, DeletePreview, Filters, InputMode, LogEntry, LogLevel, LogTab, ScrollState},
+    model::{
+        App, DeletePreview, Filters, InputMode, LogEntry, LogLevel, LogTab, ParsedPrefix,
+        ScrollState,
+    },
 };
 
 impl App {
@@ -14,16 +17,15 @@ impl App {
         let mut tabs = Vec::new();
 
         for path in paths {
-            let name = path.file_name()
+            let name = path
+                .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| path.to_string_lossy().to_string());
 
             let content = fs::read_to_string(&path).unwrap_or_default();
-            let entries = content.lines()
-                .map(|line| LogEntry {
-                    raw: line.to_string(),
-                    level: detect_level(line),
-                })
+            let entries = content
+                .lines()
+                .map(build_entry)
                 .collect::<Vec<_>>();
 
             let mut tab = LogTab {
@@ -33,10 +35,12 @@ impl App {
                 filtered_indices: Vec::new(),
                 filters: Filters::default(),
                 delete_preview: DeletePreview::default(),
-                scroll: ScrollState { offset: 0, follow_bottom: true },
+                scroll: ScrollState {
+                    offset: 0,
+                    follow_bottom: true,
+                },
                 last_update: Instant::now(),
                 auto_refresh: true,
-                dirty: false,
             };
 
             filter::recompute_tab(&mut tab);
@@ -102,12 +106,62 @@ impl App {
     }
 }
 
+pub fn build_entry(line: &str) -> LogEntry {
+    LogEntry {
+        raw: line.to_string(),
+        level: detect_level(line),
+        parsed: parse_prefix(line),
+    }
+}
+
 pub fn detect_level(line: &str) -> LogLevel {
     let upper = line.to_ascii_uppercase();
-    if upper.contains("ERROR") { LogLevel::Error }
-    else if upper.contains("WARN") { LogLevel::Warn }
-    else if upper.contains("INFO") { LogLevel::Info }
-    else if upper.contains("DEBUG") { LogLevel::Debug }
-    else if upper.contains("TRACE") { LogLevel::Trace }
-    else { LogLevel::Info }
+    if upper.contains("ERROR") {
+        LogLevel::Error
+    } else if upper.contains("WARN") {
+        LogLevel::Warn
+    } else if upper.contains("INFO") {
+        LogLevel::Info
+    } else if upper.contains("DEBUG") {
+        LogLevel::Debug
+    } else if upper.contains("TRACE") {
+        LogLevel::Trace
+    } else {
+        LogLevel::Info
+    }
 }
+
+pub fn parse_prefix(line: &str) -> ParsedPrefix {
+    static RE: OnceLock<Regex> = OnceLock::new();
+
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r#"^(?P<time>\d{4}-\d{2}-\d{2}T[^\s]+)\s+(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\s+(?P<file>[^:\s]+):(?P<line>\d+):\s*(?P<msg>.*)$"#
+        )
+        .unwrap()
+    });
+
+    if let Some(caps) = re.captures(line) {
+        return ParsedPrefix {
+            time: caps.name("time").map(|m| m.as_str().to_string()),
+            level_text: caps.name("level").map(|m| m.as_str().to_string()),
+            file: caps.name("file").map(|m| m.as_str().to_string()),
+            file_line: caps
+                .name("line")
+                .and_then(|m| m.as_str().parse::<usize>().ok()),
+            message: caps
+                .name("msg")
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
+        };
+    }
+
+    ParsedPrefix {
+        time: None,
+        level_text: None,
+        file: None,
+        file_line: None,
+        message: line.to_string(),
+    }
+}
+

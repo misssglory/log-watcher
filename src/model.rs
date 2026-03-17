@@ -23,12 +23,33 @@ impl LogLevel {
             Unknown => Some(Trace),
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogLevel::Trace => "TRACE",
+            LogLevel::Debug => "DEBUG",
+            LogLevel::Info => "INFO",
+            LogLevel::Warn => "WARN",
+            LogLevel::Error => "ERROR",
+            LogLevel::Unknown => "UNKNOWN",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ParsedPrefix {
+    pub time: Option<String>,
+    pub level_text: Option<String>,
+    pub file: Option<String>,
+    pub file_line: Option<usize>,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub raw: String,
     pub level: LogLevel,
+    pub parsed: ParsedPrefix,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,7 +81,6 @@ pub struct LogTab {
     pub scroll: ScrollState,
     pub last_update: Instant,
     pub auto_refresh: bool,
-    pub dirty: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +89,7 @@ pub enum InputMode {
     FilterRegex,
     DeleteRegex,
     ConfirmDelete,
+    JumpToLine,
     Help,
 }
 
