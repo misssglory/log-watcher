@@ -6,6 +6,166 @@ use crate::{
   model::{App, InputMode, LogLevel},
 };
 
+fn prev_char_boundary(s: &str, idx: usize) -> usize {
+  s[..idx].char_indices().last().map(|(i, _)| i).unwrap_or(0)
+}
+
+fn next_char_boundary(s: &str, idx: usize) -> usize {
+  if idx >= s.len() {
+    s.len()
+  } else {
+    let mut iter = s[idx..].char_indices();
+    iter.next();
+    idx + iter.next().map(|(i, _)| i).unwrap_or(s.len() - idx)
+  }
+}
+
+fn is_word_char(c: char) -> bool {
+  c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':')
+}
+
+fn prev_word_start(s: &str, idx: usize) -> usize {
+  if idx == 0 {
+    return 0;
+  }
+
+  let chars: Vec<(usize, char)> = s[..idx].char_indices().collect();
+  let mut i = chars.len();
+
+  while i > 0 && chars[i - 1].1.is_whitespace() {
+    i -= 1;
+  }
+  while i > 0 && is_word_char(chars[i - 1].1) {
+    i -= 1;
+  }
+
+  chars.get(i).map(|(pos, _)| *pos).unwrap_or(0)
+}
+
+fn next_word_end(s: &str, idx: usize) -> usize {
+  if idx >= s.len() {
+    return s.len();
+  }
+
+  let chars: Vec<(usize, char)> =
+    s[idx..].char_indices().map(|(i, c)| (idx + i, c)).collect();
+
+  let mut i = 0;
+  while i < chars.len() && chars[i].1.is_whitespace() {
+    i += 1;
+  }
+  while i < chars.len() && is_word_char(chars[i].1) {
+    i += 1;
+  }
+
+  chars.get(i).map(|(pos, _)| *pos).unwrap_or(s.len())
+}
+
+fn insert_char(app: &mut App, c: char) {
+  app.input_buffer.insert(app.input_cursor, c);
+  app.input_cursor += c.len_utf8();
+}
+
+fn delete_prev_char(app: &mut App) {
+  if app.input_cursor == 0 {
+    return;
+  }
+  let prev = prev_char_boundary(&app.input_buffer, app.input_cursor);
+  app.input_buffer.replace_range(prev..app.input_cursor, "");
+  app.input_cursor = prev;
+}
+
+fn delete_next_char(app: &mut App) {
+  if app.input_cursor >= app.input_buffer.len() {
+    return;
+  }
+  let next = next_char_boundary(&app.input_buffer, app.input_cursor);
+  app.input_buffer.replace_range(app.input_cursor..next, "");
+}
+
+fn delete_prev_word(app: &mut App) {
+  let start = prev_word_start(&app.input_buffer, app.input_cursor);
+  app.input_buffer.replace_range(start..app.input_cursor, "");
+  app.input_cursor = start;
+}
+
+fn delete_next_word(app: &mut App) {
+  let end = next_word_end(&app.input_buffer, app.input_cursor);
+  app.input_buffer.replace_range(app.input_cursor..end, "");
+}
+
+fn move_left(app: &mut App) {
+  app.input_cursor = prev_char_boundary(&app.input_buffer, app.input_cursor);
+}
+
+fn move_right(app: &mut App) {
+  app.input_cursor = next_char_boundary(&app.input_buffer, app.input_cursor);
+}
+
+fn move_word_left(app: &mut App) {
+  app.input_cursor = prev_word_start(&app.input_buffer, app.input_cursor);
+}
+
+fn move_word_right(app: &mut App) {
+  app.input_cursor = next_word_end(&app.input_buffer, app.input_cursor);
+}
+
+fn handle_text_edit(app: &mut App, key: KeyEvent) -> bool {
+  match (key.code, key.modifiers) {
+    (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
+      move_word_left(app);
+      true
+    }
+    (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
+      move_word_right(app);
+      true
+    }
+    (KeyCode::Left, _) => {
+      move_left(app);
+      true
+    }
+    (KeyCode::Right, _) => {
+      move_right(app);
+      true
+    }
+    (KeyCode::Backspace, m)
+      if m.contains(KeyModifiers::SHIFT)
+        || m.contains(KeyModifiers::CONTROL) =>
+    {
+      delete_prev_word(app);
+      true
+    }
+    (KeyCode::Delete, m)
+      if m.contains(KeyModifiers::SHIFT)
+        || m.contains(KeyModifiers::CONTROL) =>
+    {
+      delete_next_word(app);
+      true
+    }
+    (KeyCode::Backspace, _) => {
+      delete_prev_char(app);
+      true
+    }
+    (KeyCode::Delete, _) => {
+      delete_next_char(app);
+      true
+    }
+    (KeyCode::Home, _) => {
+      app.input_cursor = 0;
+      true
+    }
+    (KeyCode::End, _) => {
+      app.input_cursor = app.input_buffer.len();
+      true
+    }
+    (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+      insert_char(app, c);
+      true
+    }
+    _ => false,
+  }
+}
+
 pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
   match app.input_mode {
     InputMode::Normal => handle_normal(app, key),
@@ -30,7 +190,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         (app.selected_tab + app.tabs.len() - 1) % app.tabs.len()
     }
     KeyCode::Down | KeyCode::Char('j') => {
-      let len = app.current_tab().filtered_indices.len();
+      let len = app.current_tab().rendered_lines.len();
       let tab = app.current_tab_mut();
       tab.scroll.offset = (tab.scroll.offset + 1).min(len.saturating_sub(1));
       tab.scroll.follow_bottom = false;
@@ -41,7 +201,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.scroll.follow_bottom = false;
     }
     KeyCode::PageDown | KeyCode::Char('f') => {
-      let len = app.current_tab().filtered_indices.len();
+      let len = app.current_tab().rendered_lines.len();
       let tab = app.current_tab_mut();
       tab.scroll.offset = (tab.scroll.offset + 20).min(len.saturating_sub(1));
       tab.scroll.follow_bottom = false;
@@ -57,7 +217,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.scroll.follow_bottom = false;
     }
     KeyCode::End | KeyCode::Char('G') => {
-      let len = app.current_tab().filtered_indices.len();
+      let len = app.current_tab().rendered_lines.len();
       let tab = app.current_tab_mut();
       tab.scroll.offset = len.saturating_sub(1);
       tab.scroll.follow_bottom = true;
@@ -73,20 +233,24 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     KeyCode::Char('p') => {
       let tab = app.current_tab_mut();
       tab.pretty_print = !tab.pretty_print;
+      tab.rendered_lines.clear();
       app.status = format!("Pretty print: {}", tab.pretty_print);
     }
     KeyCode::Char('r') => app.refresh_current()?,
     KeyCode::Char('R') => app.refresh_all()?,
     KeyCode::Char('/') => {
       app.input_buffer.clear();
+      app.input_cursor = 0;
       app.input_mode = InputMode::FilterRegex;
     }
     KeyCode::Char('x') => {
       app.input_buffer.clear();
+      app.input_cursor = 0;
       app.input_mode = InputMode::DeleteRegex;
     }
     KeyCode::Char('*') => {
       app.input_buffer = app.current_tab().search.pattern.clone();
+      app.input_cursor = app.input_buffer.len();
       app.input_mode = InputMode::SearchRegex;
     }
     KeyCode::Char('n') => {
@@ -97,6 +261,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     }
     KeyCode::Char(':') => {
       app.input_buffer.clear();
+      app.input_cursor = 0;
       app.input_mode = InputMode::JumpToLine;
     }
     KeyCode::Char('D') => {
@@ -117,6 +282,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.search.regex = None;
       tab.search.pattern.clear();
       tab.search.active_match_line = None;
+      tab.rendered_lines.clear();
       app.status = "Cleared search".into();
     }
     KeyCode::Char('l') => {
@@ -143,13 +309,9 @@ fn handle_filter_input(app: &mut App, key: KeyEvent) -> Result<()> {
       app.status = format!("Filter regex set: {}", pattern);
       app.input_mode = InputMode::Normal;
     }
-    KeyCode::Backspace => {
-      app.input_buffer.pop();
+    _ => {
+      handle_text_edit(app, key);
     }
-    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-      app.input_buffer.push(c)
-    }
-    _ => {}
   }
   Ok(())
 }
@@ -167,13 +329,9 @@ fn handle_delete_input(app: &mut App, key: KeyEvent) -> Result<()> {
       );
       app.input_mode = InputMode::Normal;
     }
-    KeyCode::Backspace => {
-      app.input_buffer.pop();
+    _ => {
+      handle_text_edit(app, key);
     }
-    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-      app.input_buffer.push(c)
-    }
-    _ => {}
   }
   Ok(())
 }
@@ -189,13 +347,9 @@ fn handle_search_input(app: &mut App, key: KeyEvent) -> Result<()> {
       }
       app.input_mode = InputMode::Normal;
     }
-    KeyCode::Backspace => {
-      app.input_buffer.pop();
+    _ => {
+      handle_text_edit(app, key);
     }
-    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-      app.input_buffer.push(c)
-    }
-    _ => {}
   }
   Ok(())
 }
@@ -224,13 +378,9 @@ fn handle_jump_input(app: &mut App, key: KeyEvent) -> Result<()> {
       }
       app.input_mode = InputMode::Normal;
     }
-    KeyCode::Backspace => {
-      app.input_buffer.pop();
+    _ => {
+      handle_text_edit(app, key);
     }
-    KeyCode::Char(c) if c.is_ascii_digit() => {
-      app.input_buffer.push(c);
-    }
-    _ => {}
   }
   Ok(())
 }
@@ -238,23 +388,27 @@ fn handle_jump_input(app: &mut App, key: KeyEvent) -> Result<()> {
 fn jump_to_real_line(app: &mut App, target: usize) {
   let tab = app.current_tab_mut();
 
-  if let Some(pos) =
-    tab.filtered_indices.iter().position(|idx| *idx + 1 == target)
+  if let Some(render_pos) = tab
+    .rendered_lines
+    .iter()
+    .position(|l| l.source_real_line_no == target && l.is_first_visual_line)
   {
-    tab.scroll.offset = pos;
+    tab.scroll.offset = render_pos;
     tab.scroll.follow_bottom = false;
     app.status = format!("Jumped to line {}", target);
     return;
   }
 
-  if let Some(pos) =
-    tab.filtered_indices.iter().position(|idx| *idx + 1 >= target)
+  if let Some(render_pos) = tab
+    .rendered_lines
+    .iter()
+    .position(|l| l.source_real_line_no >= target && l.is_first_visual_line)
   {
-    tab.scroll.offset = pos;
+    tab.scroll.offset = render_pos;
     tab.scroll.follow_bottom = false;
     app.status = format!("Jumped near line {}", target);
-  } else if !tab.filtered_indices.is_empty() {
-    tab.scroll.offset = tab.filtered_indices.len() - 1;
+  } else if !tab.rendered_lines.is_empty() {
+    tab.scroll.offset = tab.rendered_lines.len() - 1;
     tab.scroll.follow_bottom = false;
     app.status = format!("Line {} is after end of file", target);
   } else {

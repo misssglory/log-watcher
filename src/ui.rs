@@ -5,11 +5,9 @@ use ratatui::{
   widgets::{Block, Borders, Paragraph, Tabs, Wrap},
   Frame,
 };
+use unicode_width::UnicodeWidthStr;
 
-use crate::{
-  highlight,
-  model::{App, InputMode},
-};
+use crate::model::{App, InputMode};
 
 fn key_style() -> Style {
   Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -37,6 +35,26 @@ fn bool_style(v: bool) -> Style {
 
 fn sep() -> Span<'static> {
   Span::styled(" | ", dim_style())
+}
+
+fn is_input_mode(mode: InputMode) -> bool {
+  matches!(
+    mode,
+    InputMode::FilterRegex
+      | InputMode::DeleteRegex
+      | InputMode::SearchRegex
+      | InputMode::JumpToLine
+  )
+}
+
+fn input_prefix(mode: InputMode) -> &'static str {
+  match mode {
+    InputMode::FilterRegex => "/ ",
+    InputMode::DeleteRegex => "x ",
+    InputMode::SearchRegex => "* ",
+    InputMode::JumpToLine => ": ",
+    _ => "",
+  }
 }
 
 fn footer_line(app: &App) -> Line<'static> {
@@ -119,25 +137,11 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("status=", label_style()));
       spans.push(Span::styled(app.status.clone(), value_style()));
     }
-    InputMode::FilterRegex => {
-      spans.push(Span::styled("/", key_style()));
-      spans.push(Span::raw(" "));
-      spans.push(Span::styled(app.input_buffer.clone(), value_style()));
-    }
-    InputMode::DeleteRegex => {
-      spans.push(Span::styled("x", key_style()));
-      spans.push(Span::raw(" "));
-      spans.push(Span::styled(app.input_buffer.clone(), value_style()));
-      spans.push(sep());
-      spans.push(Span::styled("matches=", label_style()));
-      spans.push(Span::styled(
-        tab.delete_preview.matches.to_string(),
-        value_style(),
-      ));
-    }
-    InputMode::SearchRegex => {
-      spans.push(Span::styled("*", key_style()));
-      spans.push(Span::raw(" "));
+    InputMode::FilterRegex
+    | InputMode::DeleteRegex
+    | InputMode::SearchRegex
+    | InputMode::JumpToLine => {
+      spans.push(Span::styled(input_prefix(app.input_mode), key_style()));
       spans.push(Span::styled(app.input_buffer.clone(), value_style()));
     }
     InputMode::ConfirmDelete => {
@@ -152,11 +156,6 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("Esc", key_style()));
       spans.push(Span::styled(" cancel", label_style()));
     }
-    InputMode::JumpToLine => {
-      spans.push(Span::styled(":", key_style()));
-      spans.push(Span::raw(" "));
-      spans.push(Span::styled(app.input_buffer.clone(), value_style()));
-    }
     InputMode::Help => {
       spans.push(Span::styled("q", key_style()));
       spans.push(Span::styled(" quit", label_style()));
@@ -167,30 +166,18 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("j/k", key_style()));
       spans.push(Span::styled(" move", label_style()));
       spans.push(sep());
-      spans.push(Span::styled("g/G", key_style()));
-      spans.push(Span::styled(" top/bot", label_style()));
+      spans.push(Span::styled("Ctrl+←/→", key_style()));
+      spans.push(Span::styled(" word", label_style()));
       spans.push(sep());
-      spans.push(Span::styled(":", key_style()));
-      spans.push(Span::styled(" jump", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("/", key_style()));
-      spans.push(Span::styled(" filter", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("*", key_style()));
-      spans.push(Span::styled(" search", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("n/N", key_style()));
-      spans.push(Span::styled(" next/prev", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("p", key_style()));
-      spans.push(Span::styled(" pretty", label_style()));
+      spans.push(Span::styled("Shift+Bksp/Del", key_style()));
+      spans.push(Span::styled(" chunk-del", label_style()));
     }
   }
 
   Line::from(spans)
 }
 
-pub fn render(frame: &mut Frame, app: &App) {
+pub fn render(frame: &mut Frame, app: &mut App) {
   let chunks = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
@@ -221,40 +208,22 @@ pub fn render(frame: &mut Frame, app: &App) {
 
   frame.render_widget(tabs, chunks[0]);
 
-  let tab = app.current_tab();
   let viewport_width = chunks[1].width.saturating_sub(2) as usize;
   let viewport_height = chunks[1].height.saturating_sub(2) as usize;
 
+  app.ensure_rendered_lines(viewport_width);
+
+  let tab = app.current_tab();
   let visible_count = viewport_height.max(1);
   let current =
-    tab.scroll.offset.min(tab.filtered_indices.len().saturating_sub(1));
+    tab.scroll.offset.min(tab.rendered_lines.len().saturating_sub(1));
   let start_idx = current.saturating_sub(visible_count.saturating_sub(1));
+  let end_idx = (start_idx + visible_count).min(tab.rendered_lines.len());
 
-  let mut rendered = Vec::new();
-  for filtered_pos in start_idx..tab.filtered_indices.len() {
-    let real_idx = tab.filtered_indices[filtered_pos];
-    let entry = &tab.entries[real_idx];
-
-    let lines = highlight::render_entry_lines(
-      real_idx + 1,
-      entry,
-      viewport_width,
-      tab.pretty_print,
-      tab.search.regex.as_ref(),
-      tab.search.active_match_line == Some(real_idx),
-    );
-
-    for line in lines {
-      rendered.push(line);
-      if rendered.len() >= visible_count {
-        break;
-      }
-    }
-
-    if rendered.len() >= visible_count {
-      break;
-    }
-  }
+  let rendered = tab.rendered_lines[start_idx..end_idx]
+    .iter()
+    .map(|rl| rl.line.clone())
+    .collect::<Vec<_>>();
 
   let paragraph = Paragraph::new(rendered)
     .block(
@@ -268,4 +237,15 @@ pub fn render(frame: &mut Frame, app: &App) {
 
   let footer = Paragraph::new(footer_line(app));
   frame.render_widget(footer, chunks[2]);
+
+  if is_input_mode(app.input_mode) {
+    let prefix = input_prefix(app.input_mode);
+    let prefix_width = UnicodeWidthStr::width(prefix) as u16;
+    let cursor_width =
+      UnicodeWidthStr::width(&app.input_buffer[..app.input_cursor]) as u16;
+    frame.set_cursor_position((
+      chunks[2].x + prefix_width + cursor_width,
+      chunks[2].y,
+    ));
+  }
 }

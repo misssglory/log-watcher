@@ -4,10 +4,10 @@ use anyhow::Result;
 use regex::Regex;
 
 use crate::{
-  file_source, filter,
+  file_source, filter, highlight,
   model::{
     App, DeletePreview, Filters, InputMode, LogEntry, LogLevel, LogTab,
-    ParsedPrefix, ScrollState, SearchState,
+    ParsedPrefix, RenderedLine, ScrollState, SearchState,
   },
 };
 
@@ -29,6 +29,8 @@ impl App {
         path,
         entries,
         filtered_indices: Vec::new(),
+        rendered_lines: Vec::new(),
+        last_render_width: 0,
         filters: Filters::default(),
         delete_preview: DeletePreview::default(),
         scroll: ScrollState { offset: 0, follow_bottom: true },
@@ -48,6 +50,7 @@ impl App {
       should_quit: false,
       input_mode: InputMode::Normal,
       input_buffer: String::new(),
+      input_cursor: 0,
       status: "Ready".into(),
     })
   }
@@ -89,6 +92,7 @@ impl App {
     let tab = self.current_tab_mut();
     tab.filters.include_regex = Some(re);
     filter::recompute_tab(tab);
+    tab.rendered_lines.clear();
     Ok(())
   }
 
@@ -107,6 +111,7 @@ impl App {
       tab.search.regex = None;
       tab.search.pattern.clear();
       tab.search.active_match_line = None;
+      tab.rendered_lines.clear();
       self.status = "Cleared search".into();
       return Ok(());
     }
@@ -115,8 +120,48 @@ impl App {
     tab.search.regex = Some(re);
     tab.search.pattern = pattern.to_string();
     tab.search.active_match_line = None;
+    tab.rendered_lines.clear();
     self.status = format!("Search regex set: {}", pattern);
     Ok(())
+  }
+
+  pub fn ensure_rendered_lines(&mut self, width: usize) {
+    let tab = self.current_tab_mut();
+    if tab.last_render_width == width && !tab.rendered_lines.is_empty() {
+      return;
+    }
+
+    let mut lines = Vec::<RenderedLine>::new();
+
+    for real_idx in tab.filtered_indices.clone() {
+      let entry = &tab.entries[real_idx];
+      let rendered = highlight::render_entry_lines(
+        real_idx + 1,
+        entry,
+        width,
+        tab.pretty_print,
+        tab.search.regex.as_ref(),
+        tab.search.active_match_line == Some(real_idx),
+      );
+
+      for (i, line) in rendered.into_iter().enumerate() {
+        lines.push(RenderedLine {
+          line,
+          source_entry_idx: real_idx,
+          source_real_line_no: real_idx + 1,
+          is_first_visual_line: i == 0,
+        });
+      }
+    }
+
+    tab.rendered_lines = lines;
+    tab.last_render_width = width;
+
+    if tab.scroll.follow_bottom {
+      tab.scroll.offset = tab.rendered_lines.len().saturating_sub(1);
+    } else if tab.scroll.offset >= tab.rendered_lines.len() {
+      tab.scroll.offset = tab.rendered_lines.len().saturating_sub(1);
+    }
   }
 
   pub fn goto_next_search_match(&mut self) {
@@ -132,17 +177,39 @@ impl App {
     }
 
     let len = tab.filtered_indices.len();
-    let start = tab.scroll.offset.saturating_add(1) % len;
+    let mut start_pos = 0usize;
+
+    if let Some(active) = tab.search.active_match_line {
+      if let Some(pos) =
+        tab.filtered_indices.iter().position(|&idx| idx == active)
+      {
+        start_pos = (pos + 1) % len;
+      }
+    } else if let Some(current_line) = tab.rendered_lines.get(tab.scroll.offset)
+    {
+      if let Some(pos) = tab
+        .filtered_indices
+        .iter()
+        .position(|&idx| idx == current_line.source_entry_idx)
+      {
+        start_pos = (pos + 1) % len;
+      }
+    }
 
     for step in 0..len {
-      let pos = (start + step) % len;
+      let pos = (start_pos + step) % len;
       let real_idx = tab.filtered_indices[pos];
       let entry = &tab.entries[real_idx];
 
       if re.is_match(&entry.raw) {
-        tab.scroll.offset = pos;
-        tab.scroll.follow_bottom = false;
         tab.search.active_match_line = Some(real_idx);
+        if let Some(render_pos) = tab.rendered_lines.iter().position(|l| {
+          l.source_entry_idx == real_idx && l.is_first_visual_line
+        }) {
+          tab.scroll.offset = render_pos;
+          tab.scroll.follow_bottom = false;
+        }
+        tab.rendered_lines.clear();
         self.status = format!("Next match at line {}", real_idx + 1);
         return;
       }
@@ -164,18 +231,39 @@ impl App {
     }
 
     let len = tab.filtered_indices.len();
-    let start =
-      if tab.scroll.offset == 0 { len - 1 } else { tab.scroll.offset - 1 };
+    let mut start_pos = len.saturating_sub(1);
+
+    if let Some(active) = tab.search.active_match_line {
+      if let Some(pos) =
+        tab.filtered_indices.iter().position(|&idx| idx == active)
+      {
+        start_pos = if pos == 0 { len - 1 } else { pos - 1 };
+      }
+    } else if let Some(current_line) = tab.rendered_lines.get(tab.scroll.offset)
+    {
+      if let Some(pos) = tab
+        .filtered_indices
+        .iter()
+        .position(|&idx| idx == current_line.source_entry_idx)
+      {
+        start_pos = if pos == 0 { len - 1 } else { pos - 1 };
+      }
+    }
 
     for step in 0..len {
-      let pos = (start + len - step) % len;
+      let pos = (start_pos + len - step) % len;
       let real_idx = tab.filtered_indices[pos];
       let entry = &tab.entries[real_idx];
 
       if re.is_match(&entry.raw) {
-        tab.scroll.offset = pos;
-        tab.scroll.follow_bottom = false;
         tab.search.active_match_line = Some(real_idx);
+        if let Some(render_pos) = tab.rendered_lines.iter().position(|l| {
+          l.source_entry_idx == real_idx && l.is_first_visual_line
+        }) {
+          tab.scroll.offset = render_pos;
+          tab.scroll.follow_bottom = false;
+        }
+        tab.rendered_lines.clear();
         self.status = format!("Previous match at line {}", real_idx + 1);
         return;
       }
@@ -214,11 +302,11 @@ pub fn parse_prefix(line: &str) -> ParsedPrefix {
   static RE: OnceLock<Regex> = OnceLock::new();
 
   let re = RE.get_or_init(|| {
-        Regex::new(
-            r#"^(?P<time>\d{4}-\d{2}-\d{2}T[^\s]+)\s+(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\s+(?P<file>[^:\s]+):(?P<line>\d+):\s*(?P<msg>.*)$"#
-        )
-        .unwrap()
-    });
+    Regex::new(
+        r#"^(?P<time>\d{4}-\d{2}-\d{2}T[^\s]+)\s+(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\s+(?P<file>[^:\s]+):(?P<line>\d+):\s*(?P<msg>.*)$"#
+    )
+    .unwrap()
+});
 
   if let Some(caps) = re.captures(line) {
     return ParsedPrefix {

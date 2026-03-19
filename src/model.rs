@@ -1,6 +1,8 @@
 use regex::Regex;
 use std::{path::PathBuf, time::Instant};
 
+use ratatui::text::Line;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
   Trace,
@@ -77,12 +79,22 @@ pub struct SearchState {
   pub active_match_line: Option<usize>,
 }
 
+#[derive(Debug, Clone)]
+pub struct RenderedLine {
+  pub line: Line<'static>,
+  pub source_entry_idx: usize,
+  pub source_real_line_no: usize,
+  pub is_first_visual_line: bool,
+}
+
 #[derive(Debug)]
 pub struct LogTab {
   pub name: String,
   pub path: PathBuf,
   pub entries: Vec<LogEntry>,
   pub filtered_indices: Vec<usize>,
+  pub rendered_lines: Vec<RenderedLine>,
+  pub last_render_width: usize,
   pub filters: Filters,
   pub delete_preview: DeletePreview,
   pub scroll: ScrollState,
@@ -109,5 +121,6 @@ pub struct App {
   pub should_quit: bool,
   pub input_mode: InputMode,
   pub input_buffer: String,
+  pub input_cursor: usize,
   pub status: String,
 }
