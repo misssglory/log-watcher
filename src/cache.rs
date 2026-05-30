@@ -69,6 +69,7 @@ pub fn load_recents() -> Vec<RecentItem> {
       let (kind, value) = line.split_once('\t')?;
       match kind {
         "file" => Some(RecentItem::File(PathBuf::from(decode(value)))),
+        "folder" => Some(RecentItem::Folder(PathBuf::from(decode(value)))),
         "command" => Some(RecentItem::Command(decode(value))),
         _ => None,
       }
@@ -84,6 +85,9 @@ pub fn save_recents(recents: &[RecentItem]) -> io::Result<()> {
     match item {
       RecentItem::File(path) => {
         writeln!(file, "file\t{}", encode(&path.to_string_lossy()))?;
+      }
+      RecentItem::Folder(path) => {
+        writeln!(file, "folder\t{}", encode(&path.to_string_lossy()))?;
       }
       RecentItem::Command(command) => {
         writeln!(file, "command\t{}", encode(command))?;

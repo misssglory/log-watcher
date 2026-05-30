@@ -179,10 +179,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     InputMode::OpenFile => handle_open_file_input(app, key),
     InputMode::OpenCommand => handle_open_command_input(app, key),
     InputMode::RecentPicker => handle_recent_picker(app, key),
-    InputMode::Help => {
-      app.input_mode = InputMode::Normal;
-      Ok(())
-    }
+    InputMode::CommandOverlay => handle_command_overlay(app, key),
   }
 }
 
@@ -285,10 +282,8 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       app.input_cursor = 0;
       app.input_mode = InputMode::JumpToLine;
     }
-    KeyCode::Char('D') => {
-      if app.current_tab().delete_preview.matches > 0 {
-        app.input_mode = InputMode::ConfirmDelete;
-      }
+    KeyCode::Char('D') if app.current_tab().delete_preview.matches > 0 => {
+      app.input_mode = InputMode::ConfirmDelete;
     }
     KeyCode::Char('c') => {
       let tab = app.current_tab_mut();
@@ -315,8 +310,23 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       filter::recompute_tab(tab);
       app.status = format!("Level filter: {:?}", tab.filters.min_level);
     }
-    KeyCode::Char('?') | KeyCode::Char('h') => app.input_mode = InputMode::Help,
+    KeyCode::Char('?') | KeyCode::Char('h') => {
+      app.input_mode = InputMode::CommandOverlay
+    }
     _ => {}
+  }
+  Ok(())
+}
+
+fn handle_command_overlay(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('h') => {
+      app.input_mode = InputMode::Normal;
+    }
+    _ => {
+      app.input_mode = InputMode::Normal;
+      handle_normal(app, key)?;
+    }
   }
   Ok(())
 }
@@ -327,7 +337,11 @@ fn handle_filter_input(app: &mut App, key: KeyEvent) -> Result<()> {
     KeyCode::Enter => {
       let pattern = app.input_buffer.clone();
       app.set_include_regex(&pattern)?;
-      app.status = format!("Filter regex set: {}", pattern);
+      app.status = if app.current_tab().filter_job.is_some() {
+        format!("Filtering: {pattern}")
+      } else {
+        format!("Filter regex set: {}", pattern)
+      };
       app.input_mode = InputMode::Normal;
     }
     _ => {
@@ -343,11 +357,15 @@ fn handle_delete_input(app: &mut App, key: KeyEvent) -> Result<()> {
     KeyCode::Enter => {
       let pattern = app.input_buffer.clone();
       app.set_delete_regex(&pattern)?;
-      app.status = format!(
-        "Delete preview regex set: {} ({} matches)",
-        pattern,
-        app.current_tab().delete_preview.matches
-      );
+      app.status = if app.current_tab().filter_job.is_some() {
+        format!("Filtering delete preview: {pattern}")
+      } else {
+        format!(
+          "Delete preview regex set: {} ({} matches)",
+          pattern,
+          app.current_tab().delete_preview.matches
+        )
+      };
       app.input_mode = InputMode::Normal;
     }
     _ => {
@@ -478,11 +496,9 @@ fn handle_open_command_input(app: &mut App, key: KeyEvent) -> Result<()> {
 fn handle_recent_picker(app: &mut App, key: KeyEvent) -> Result<()> {
   match key.code {
     KeyCode::Esc => app.input_mode = InputMode::Normal,
-    KeyCode::Down | KeyCode::Char('j') => {
-      if !app.recents.is_empty() {
-        app.recent_selected =
-          (app.recent_selected + 1).min(app.recents.len() - 1);
-      }
+    KeyCode::Down | KeyCode::Char('j') if !app.recents.is_empty() => {
+      app.recent_selected =
+        (app.recent_selected + 1).min(app.recents.len() - 1);
     }
     KeyCode::Up | KeyCode::Char('k') => {
       app.recent_selected = app.recent_selected.saturating_sub(1);
@@ -491,14 +507,12 @@ fn handle_recent_picker(app: &mut App, key: KeyEvent) -> Result<()> {
       app.open_recent_selected()?;
       app.input_mode = InputMode::Normal;
     }
-    KeyCode::Char('d') => {
-      if app.recent_selected < app.recents.len() {
-        app.recents.remove(app.recent_selected);
-        app.recent_selected =
-          app.recent_selected.min(app.recents.len().saturating_sub(1));
-        if let Err(err) = crate::cache::save_recents(&app.recents) {
-          app.status = format!("Failed to save recents: {err}");
-        }
+    KeyCode::Char('d') if app.recent_selected < app.recents.len() => {
+      app.recents.remove(app.recent_selected);
+      app.recent_selected =
+        app.recent_selected.min(app.recents.len().saturating_sub(1));
+      if let Err(err) = crate::cache::save_recents(&app.recents) {
+        app.status = format!("Failed to save recents: {err}");
       }
     }
     _ => {}
@@ -508,7 +522,8 @@ fn handle_recent_picker(app: &mut App, key: KeyEvent) -> Result<()> {
 
 pub fn recent_label(item: &RecentItem) -> String {
   match item {
-    RecentItem::File(path) => format!("file {}", path.display()),
-    RecentItem::Command(command) => format!("cmd  {command}"),
+    RecentItem::File(path) => format!("file   {}", path.display()),
+    RecentItem::Folder(path) => format!("folder {}", path.display()),
+    RecentItem::Command(command) => format!("cmd    {command}"),
   }
 }
