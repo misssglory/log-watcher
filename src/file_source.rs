@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use crate::{
   app::build_entry,
   filter,
-  model::{LogEntry, LogTab, PagingState, TabSource},
+  model::{FolderFile, FolderState, LogEntry, LogTab, PagingState, TabSource},
 };
 
 const MAX_LINES_PER_FILE: usize = 200_000;
@@ -38,7 +38,15 @@ pub fn has_file_changed(tab: &LogTab) -> Result<bool> {
 pub fn reload_tab(tab: &mut LogTab) -> Result<()> {
   let (entries, paging) = match &tab.source {
     TabSource::File(path) => load_file_entries(path)?,
-    TabSource::Folder(path) => load_folder_entries(path)?,
+    TabSource::Folder(path) => {
+      if tab.folder.as_ref().is_some_and(|folder| folder.follow_newest) {
+        if let Some(folder) = &mut tab.folder {
+          folder.selected = 0;
+          folder.picker_selected = 0;
+        }
+      }
+      load_folder_entries_for_state(path, tab.folder.as_mut())?
+    }
     TabSource::Command(_) => return Ok(()),
   };
 
@@ -71,28 +79,59 @@ pub fn load_file_entries(path: &Path) -> Result<(Vec<LogEntry>, PagingState)> {
 
 pub fn load_folder_entries(
   path: &Path,
-) -> Result<(Vec<LogEntry>, PagingState)> {
-  let files = sorted_files_newest_first(path)?;
-  let total_files = files.len();
-  let mut entries = Vec::new();
-  let mut truncated_files = 0usize;
+) -> Result<(Vec<LogEntry>, PagingState, FolderState)> {
+  let mut folder =
+    FolderState { files: folder_files(path)?, ..Default::default() };
+  let (entries, paging) =
+    load_folder_entries_for_state(path, Some(&mut folder))?;
+  Ok((entries, paging, folder))
+}
 
-  for file in &files {
-    let file_label = file
-      .file_name()
-      .map(|s| s.to_string_lossy().to_string())
-      .unwrap_or_else(|| file.display().to_string());
-    let (file_entries, truncated) = read_log_file(file, Some(&file_label))?;
-    truncated_files += usize::from(truncated);
-    entries.extend(file_entries);
+pub fn load_folder_entries_for_state(
+  path: &Path,
+  folder: Option<&mut FolderState>,
+) -> Result<(Vec<LogEntry>, PagingState)> {
+  let mut fallback;
+  let folder = match folder {
+    Some(folder) => folder,
+    None => {
+      fallback =
+        FolderState { files: folder_files(path)?, ..Default::default() };
+      &mut fallback
+    }
+  };
+
+  let previous = folder.current_file().map(|file| file.path.clone());
+  folder.files = folder_files(path)?;
+  if folder.follow_newest {
+    folder.selected = 0;
+  } else if let Some(previous) = previous {
+    folder.select_by_path(&previous);
+  } else {
+    folder.selected = folder.selected.min(folder.files.len().saturating_sub(1));
+    folder.picker_selected = folder.selected;
   }
 
+  let total_files = folder.files.len();
+  let Some(file) = folder.current_file() else {
+    return Ok((
+      Vec::new(),
+      PagingState {
+        loaded_files: 0,
+        total_files: 0,
+        truncated_files: 0,
+        max_lines_per_file: MAX_LINES_PER_FILE,
+      },
+    ));
+  };
+
+  let (entries, truncated) = read_log_file(&file.path, Some(&file.label))?;
   Ok((
     entries,
     PagingState {
-      loaded_files: total_files,
+      loaded_files: usize::from(!folder.files.is_empty()),
       total_files,
-      truncated_files,
+      truncated_files: usize::from(truncated),
       max_lines_per_file: MAX_LINES_PER_FILE,
     },
   ))
@@ -141,7 +180,22 @@ fn folder_changed_recently(path: &Path) -> Result<bool> {
   Ok(false)
 }
 
-fn sorted_files_newest_first(path: &Path) -> Result<Vec<PathBuf>> {
+fn folder_files(path: &Path) -> Result<Vec<FolderFile>> {
+  Ok(
+    sorted_files_newest_first(path)?
+      .into_iter()
+      .map(|path| {
+        let label = path
+          .file_name()
+          .map(|s| s.to_string_lossy().to_string())
+          .unwrap_or_else(|| path.display().to_string());
+        FolderFile { path, label }
+      })
+      .collect(),
+  )
+}
+
+pub fn sorted_files_newest_first(path: &Path) -> Result<Vec<PathBuf>> {
   let mut files = Vec::new();
   for entry in
     fs::read_dir(path).with_context(|| format!("reading {}", path.display()))?
@@ -164,7 +218,7 @@ fn sorted_files_newest_first(path: &Path) -> Result<Vec<PathBuf>> {
 
 fn read_log_file(
   path: &Path,
-  prefix: Option<&str>,
+  source_file: Option<&str>,
 ) -> Result<(Vec<LogEntry>, bool)> {
   let text = read_text_with_detection(path)?;
   let mut lines = VecDeque::new();
@@ -178,16 +232,8 @@ fn read_log_file(
     lines.push_back(line.to_string());
   }
 
-  let entries = lines
-    .into_iter()
-    .map(|line| {
-      let raw = match prefix {
-        Some(prefix) => format!("[{prefix}] {line}"),
-        None => line,
-      };
-      build_entry(&raw)
-    })
-    .collect();
+  let entries =
+    lines.into_iter().map(|line| build_entry(&line, source_file)).collect();
 
   Ok((entries, truncated))
 }

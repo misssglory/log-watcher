@@ -13,9 +13,9 @@ use regex::Regex;
 use crate::{
   cache, file_source, filter, highlight,
   model::{
-    App, CommandStream, DeletePreview, Filters, InputMode, LogEntry, LogLevel,
-    LogTab, ParsedPrefix, RecentItem, RenderedLine, ScrollState, SearchState,
-    TabSource,
+    App, CommandStream, DeletePreview, DisplayOptions, Filters, InputMode,
+    LogEntry, LogLevel, LogTab, ParsedPrefix, RecentItem, RenderedLine,
+    ScrollState, SearchState, TabSource,
   },
 };
 
@@ -64,9 +64,10 @@ impl App {
       .map(|s| format!("{}/", s.to_string_lossy()))
       .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-    let (entries, paging) = file_source::load_folder_entries(&path)?;
+    let (entries, paging, folder) = file_source::load_folder_entries(&path)?;
     let mut tab = Self::make_tab(name, TabSource::Folder(path), entries, false);
     tab.paging = Some(paging);
+    tab.folder = Some(folder);
     Ok(tab)
   }
 
@@ -89,7 +90,9 @@ impl App {
       last_update: Instant::now(),
       auto_refresh,
       pretty_print: true,
+      display: DisplayOptions::default(),
       search: SearchState::default(),
+      folder: None,
       filter_job: None,
       paging: None,
     };
@@ -233,7 +236,7 @@ impl App {
 
       let mut changed = false;
       while let Ok(line) = stream.rx.try_recv() {
-        tab.entries.push(build_entry(&line));
+        tab.entries.push(build_entry(&line, None));
         changed = true;
       }
 
@@ -242,10 +245,13 @@ impl App {
           stream.finished = true;
           let level =
             if status.success() { LogLevel::Info } else { LogLevel::Error };
-          tab.entries.push(build_entry(&format_tracing_line(
-            level,
-            &format!("command exited with {status}"),
-          )));
+          tab.entries.push(build_entry(
+            &format_tracing_line(
+              level,
+              &format!("command exited with {status}"),
+            ),
+            None,
+          ));
           changed = true;
         }
       }
@@ -260,6 +266,73 @@ impl App {
         }
       }
     }
+    Ok(())
+  }
+
+  pub fn toggle_display_field(&mut self, field: char) {
+    let tab = self.current_tab_mut();
+    let (name, enabled) = match field {
+      '1' => {
+        tab.display.timestamp = !tab.display.timestamp;
+        ("timestamp", tab.display.timestamp)
+      }
+      '2' => {
+        tab.display.level = !tab.display.level;
+        ("level", tab.display.level)
+      }
+      '3' => {
+        tab.display.target = !tab.display.target;
+        ("target", tab.display.target)
+      }
+      '4' => {
+        tab.display.file = !tab.display.file;
+        ("file", tab.display.file)
+      }
+      '5' => {
+        tab.display.thread_id = !tab.display.thread_id;
+        ("thread id", tab.display.thread_id)
+      }
+      _ => return,
+    };
+    tab.rendered_lines.clear();
+    self.status = format!("Show {name}: {enabled}");
+  }
+
+  pub fn select_folder_picker_file(&mut self) -> Result<()> {
+    let tab = self.current_tab_mut();
+    let Some(folder) = &mut tab.folder else {
+      self.status = "Current tab is not a folder".into();
+      return Ok(());
+    };
+    folder.selected =
+      folder.picker_selected.min(folder.files.len().saturating_sub(1));
+    folder.follow_newest = false;
+    file_source::reload_tab(tab)?;
+    self.status = tab
+      .folder
+      .as_ref()
+      .and_then(|folder| folder.current_file())
+      .map(|file| format!("Selected {}", file.label))
+      .unwrap_or_else(|| "No files in folder".into());
+    Ok(())
+  }
+
+  pub fn toggle_follow_newest_file(&mut self) -> Result<()> {
+    let tab = self.current_tab_mut();
+    let Some(folder) = &mut tab.folder else {
+      self.status = "Current tab is not a folder".into();
+      return Ok(());
+    };
+    folder.follow_newest = !folder.follow_newest;
+    if folder.follow_newest {
+      folder.selected = 0;
+      folder.picker_selected = 0;
+      file_source::reload_tab(tab)?;
+    }
+    self.status = format!(
+      "Follow newest file: {}",
+      tab.folder.as_ref().is_some_and(|folder| folder.follow_newest)
+    );
     Ok(())
   }
 
@@ -316,6 +389,7 @@ impl App {
         entry,
         width,
         tab.pretty_print,
+        &tab.display,
         tab.search.regex.as_ref(),
         tab.search.active_match_line == Some(real_idx),
       );
@@ -325,6 +399,7 @@ impl App {
           line,
           source_entry_idx: real_idx,
           source_real_line_no: real_idx + 1,
+          source_file: entry.source_file.clone(),
           is_first_visual_line: i == 0,
         });
       }
@@ -465,11 +540,19 @@ fn format_tracing_line(level: LogLevel, message: &str) -> String {
   format!("1970-01-01T{ts}.000Z {} command:1: {}", level.as_str(), message)
 }
 
-pub fn build_entry(line: &str) -> LogEntry {
+pub fn build_entry(line: &str, source_file: Option<&str>) -> LogEntry {
+  let parsed = parse_prefix(line);
+  let level = parsed
+    .level_text
+    .as_deref()
+    .map(detect_level)
+    .unwrap_or_else(|| detect_level(line));
+
   LogEntry {
     raw: line.to_string(),
-    level: detect_level(line),
-    parsed: parse_prefix(line),
+    level,
+    parsed,
+    source_file: source_file.map(str::to_string),
   }
 }
 
@@ -491,11 +574,15 @@ pub fn detect_level(line: &str) -> LogLevel {
 }
 
 pub fn parse_prefix(line: &str) -> ParsedPrefix {
+  if let Some(parsed) = parse_json_prefix(line) {
+    return parsed;
+  }
+
   static RE: OnceLock<Regex> = OnceLock::new();
 
   let re = RE.get_or_init(|| {
     Regex::new(
-        r#"^(?P<time>\d{4}-\d{2}-\d{2}T[^\s]+)\s+(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\s+(?P<file>[^:\s]+):(?P<line>\d+):\s*(?P<msg>.*)$"#
+        r#"^(?P<time>\d{4}-\d{2}-\d{2}T[^\s]+)\s+(?P<level>ERROR|WARN|INFO|DEBUG|TRACE)\s+(?:(?P<thread>ThreadId\([^)]*\))\s+)?(?P<target>[^\s:]+(?:::[^\s:]+)*):?\s*(?:(?P<file>[^:\s]+):(?P<line>\d+):\s*)?(?P<msg>.*)$"#
     )
     .unwrap()
 });
@@ -504,10 +591,15 @@ pub fn parse_prefix(line: &str) -> ParsedPrefix {
     return ParsedPrefix {
       time: caps.name("time").map(|m| m.as_str().to_string()),
       level_text: caps.name("level").map(|m| m.as_str().to_string()),
+      target: caps
+        .name("target")
+        .map(|m| m.as_str().trim_end_matches(':').to_string()),
       file: caps.name("file").map(|m| m.as_str().to_string()),
       file_line: caps
         .name("line")
         .and_then(|m| m.as_str().parse::<usize>().ok()),
+      thread_id: caps.name("thread").map(|m| m.as_str().to_string()),
+      thread_name: None,
       message: caps
         .name("msg")
         .map(|m| m.as_str().to_string())
@@ -518,8 +610,295 @@ pub fn parse_prefix(line: &str) -> ParsedPrefix {
   ParsedPrefix {
     time: None,
     level_text: None,
+    target: None,
     file: None,
     file_line: None,
+    thread_id: None,
+    thread_name: None,
     message: line.to_string(),
+  }
+}
+
+fn parse_json_prefix(line: &str) -> Option<ParsedPrefix> {
+  let trimmed = line.trim();
+  if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+    return None;
+  }
+
+  let time = json_string_field(trimmed, &["timestamp", "time", "ts"]);
+  let level_text = json_string_field(trimmed, &["level"]);
+  let target = json_string_field(trimmed, &["target"]);
+  let file = json_string_field(trimmed, &["filename", "file"]);
+  let file_line = json_usize_field(trimmed, &["line_number", "line"]);
+  let thread_id =
+    json_string_field(trimmed, &["threadId", "thread_id", "thread.id"]);
+  let thread_name =
+    json_string_field(trimmed, &["threadName", "thread_name", "thread.name"]);
+
+  let message = json_object_field(trimmed, "fields")
+    .map(|fields| json_fields_message(&fields))
+    .or_else(|| json_string_field(trimmed, &["message"]))
+    .unwrap_or_else(|| trimmed.to_string());
+
+  Some(ParsedPrefix {
+    time,
+    level_text,
+    target,
+    file,
+    file_line,
+    thread_id,
+    thread_name,
+    message,
+  })
+}
+
+fn json_string_field(input: &str, keys: &[&str]) -> Option<String> {
+  keys.iter().find_map(|key| {
+    let value = json_field_value(input, key)?;
+    Some(json_value_to_message(value))
+  })
+}
+
+fn json_usize_field(input: &str, keys: &[&str]) -> Option<usize> {
+  keys.iter().find_map(|key| {
+    let value = json_field_value(input, key)?.trim();
+    if let Some(stripped) =
+      value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+    {
+      unescape_json_string(stripped).parse().ok()
+    } else {
+      value
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .ok()
+    }
+  })
+}
+
+fn json_object_field(input: &str, key: &str) -> Option<String> {
+  let value = json_field_value(input, key)?.trim();
+  if value.starts_with('{') {
+    Some(value.to_string())
+  } else {
+    None
+  }
+}
+
+fn json_fields_message(fields: &str) -> String {
+  let message = json_string_field(fields, &["message"]);
+  let extra = remove_json_object_key(fields, "message");
+  match (message, extra.as_deref()) {
+    (Some(message), Some("{}")) | (Some(message), None) => message,
+    (Some(message), Some(extra)) if !message.is_empty() => {
+      format!("{message} {extra}")
+    }
+    (_, Some(extra)) => extra.to_string(),
+    _ => fields.to_string(),
+  }
+}
+
+fn json_field_value<'a>(input: &'a str, key: &str) -> Option<&'a str> {
+  let pattern = format!("\"{}\"", key);
+  let mut search_start = 0usize;
+  while let Some(rel) = input[search_start..].find(&pattern) {
+    let key_start = search_start + rel;
+    let mut idx = key_start + pattern.len();
+    idx = skip_json_ws(input, idx);
+    if !input[idx..].starts_with(':') {
+      search_start = idx;
+      continue;
+    }
+    idx += 1;
+    idx = skip_json_ws(input, idx);
+    let end = json_value_end(input, idx)?;
+    return Some(&input[idx..end]);
+  }
+  None
+}
+
+fn skip_json_ws(input: &str, mut idx: usize) -> usize {
+  while idx < input.len() {
+    let Some(ch) = input[idx..].chars().next() else {
+      break;
+    };
+    if !ch.is_whitespace() {
+      break;
+    }
+    idx += ch.len_utf8();
+  }
+  idx
+}
+
+fn json_value_end(input: &str, start: usize) -> Option<usize> {
+  let first = input[start..].chars().next()?;
+  match first {
+    '"' => json_string_end(input, start).map(|end| end + 1),
+    '{' | '[' => json_group_end(input, start).map(|end| end + 1),
+    _ => Some(
+      input[start..]
+        .find([',', '}'])
+        .map(|rel| start + rel)
+        .unwrap_or(input.len()),
+    ),
+  }
+}
+
+fn json_string_end(input: &str, start: usize) -> Option<usize> {
+  let mut escaped = false;
+  for (rel, ch) in input[start + 1..].char_indices() {
+    if escaped {
+      escaped = false;
+    } else if ch == '\\' {
+      escaped = true;
+    } else if ch == '"' {
+      return Some(start + 1 + rel);
+    }
+  }
+  None
+}
+
+fn json_group_end(input: &str, start: usize) -> Option<usize> {
+  let open = input[start..].chars().next()?;
+  let close = if open == '{' { '}' } else { ']' };
+  let mut depth = 0usize;
+  let mut in_string = false;
+  let mut escaped = false;
+  for (rel, ch) in input[start..].char_indices() {
+    if in_string {
+      if escaped {
+        escaped = false;
+      } else if ch == '\\' {
+        escaped = true;
+      } else if ch == '"' {
+        in_string = false;
+      }
+      continue;
+    }
+    if ch == '"' {
+      in_string = true;
+    } else if ch == open {
+      depth += 1;
+    } else if ch == close {
+      depth = depth.saturating_sub(1);
+      if depth == 0 {
+        return Some(start + rel);
+      }
+    }
+  }
+  None
+}
+
+fn json_value_to_message(value: &str) -> String {
+  let trimmed = value.trim();
+  if let Some(stripped) =
+    trimmed.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+  {
+    unescape_json_string(stripped)
+  } else {
+    trimmed.to_string()
+  }
+}
+
+fn unescape_json_string(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  let mut chars = input.chars();
+  while let Some(ch) = chars.next() {
+    if ch != '\\' {
+      out.push(ch);
+      continue;
+    }
+    match chars.next() {
+      Some('"') => out.push('"'),
+      Some('\\') => out.push('\\'),
+      Some('/') => out.push('/'),
+      Some('n') => out.push('\n'),
+      Some('r') => out.push('\r'),
+      Some('t') => out.push('\t'),
+      Some('b') => out.push('\u{0008}'),
+      Some('f') => out.push('\u{000c}'),
+      Some('u') => {
+        let hex: String = chars.by_ref().take(4).collect();
+        if let Ok(code) = u32::from_str_radix(&hex, 16) {
+          if let Some(decoded) = char::from_u32(code) {
+            out.push(decoded);
+          }
+        }
+      }
+      Some(other) => out.push(other),
+      None => break,
+    }
+  }
+  out
+}
+
+fn remove_json_object_key(input: &str, key: &str) -> Option<String> {
+  let inner = input.trim().strip_prefix('{')?.strip_suffix('}')?;
+  let mut pieces = Vec::new();
+  let mut start = 0usize;
+  let mut depth = 0usize;
+  let mut in_string = false;
+  let mut escaped = false;
+
+  for (rel, ch) in inner.char_indices() {
+    if in_string {
+      if escaped {
+        escaped = false;
+      } else if ch == '\\' {
+        escaped = true;
+      } else if ch == '"' {
+        in_string = false;
+      }
+      continue;
+    }
+    match ch {
+      '"' => in_string = true,
+      '{' | '[' => depth += 1,
+      '}' | ']' => depth = depth.saturating_sub(1),
+      ',' if depth == 0 => {
+        push_json_piece_without_key(&inner[start..rel], key, &mut pieces);
+        start = rel + 1;
+      }
+      _ => {}
+    }
+  }
+  push_json_piece_without_key(&inner[start..], key, &mut pieces);
+  Some(format!("{{{}}}", pieces.join(",")))
+}
+
+fn push_json_piece_without_key(
+  piece: &str,
+  key: &str,
+  pieces: &mut Vec<String>,
+) {
+  let trimmed = piece.trim();
+  if trimmed.is_empty() || trimmed.starts_with(&format!("\"{key}\"")) {
+    return;
+  }
+  pieces.push(trimmed.to_string());
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn parses_tracing_json_log_metadata_and_fields() {
+    let parsed = parse_prefix(
+      r#"{"timestamp":"2026-05-30T13:33:23.601120Z","level":"INFO","fields":{"message":"resolved PoolKey","pool_id":"0xe500","chain":"ethereum"},"target":"eth_mint_server::eth::pool_manager","filename":"state.rs","line_number":570,"threadId":"ThreadId(14)"}"#,
+    );
+
+    assert_eq!(parsed.time.as_deref(), Some("2026-05-30T13:33:23.601120Z"));
+    assert_eq!(parsed.level_text.as_deref(), Some("INFO"));
+    assert_eq!(
+      parsed.target.as_deref(),
+      Some("eth_mint_server::eth::pool_manager")
+    );
+    assert_eq!(parsed.file.as_deref(), Some("state.rs"));
+    assert_eq!(parsed.file_line, Some(570));
+    assert_eq!(parsed.thread_id.as_deref(), Some("ThreadId(14)"));
+    assert!(parsed.message.starts_with("resolved PoolKey "));
+    assert!(parsed.message.contains(r#""pool_id":"0xe500""#));
   }
 }

@@ -5,7 +5,7 @@ use ratatui::{
 use regex::Regex;
 use unicode_width::UnicodeWidthStr;
 
-use crate::model::{LogEntry, LogLevel};
+use crate::model::{DisplayOptions, LogEntry, LogLevel};
 
 pub const PREFIX_WIDTH: usize = 70;
 const LINE_NUMBER_WIDTH: usize = 7;
@@ -430,7 +430,11 @@ fn colorize_message(
   spans
 }
 
-fn build_prefix_spans(line_no: usize, entry: &LogEntry) -> Vec<Span<'static>> {
+fn build_prefix_spans(
+  line_no: usize,
+  entry: &LogEntry,
+  display: &DisplayOptions,
+) -> Vec<Span<'static>> {
   let mut spans = Vec::new();
   let mut width = 0usize;
 
@@ -438,27 +442,51 @@ fn build_prefix_spans(line_no: usize, entry: &LogEntry) -> Vec<Span<'static>> {
   width += text_width(&line_no_part);
   spans.push(Span::styled(line_no_part, line_number_style()));
 
-  if let Some(time) = &entry.parsed.time {
-    let s = format!("{time}  ");
-    width += text_width(&s);
-    spans.push(Span::styled(s, time_style()));
+  if display.timestamp {
+    if let Some(time) = &entry.parsed.time {
+      let s = format!("{time}  ");
+      width += text_width(&s);
+      spans.push(Span::styled(s, time_style()));
+    }
   }
 
-  let level_text = entry
-    .parsed
-    .level_text
-    .clone()
-    .unwrap_or_else(|| entry.level.as_str().to_string());
-  let level_part = format!("{:<5} ", level_text);
-  width += text_width(&level_part);
-  spans.push(Span::styled(level_part, level_style(entry.level)));
+  if display.level {
+    let level_text = entry
+      .parsed
+      .level_text
+      .clone()
+      .unwrap_or_else(|| entry.level.as_str().to_string());
+    let level_part = format!("{:<5} ", level_text);
+    width += text_width(&level_part);
+    spans.push(Span::styled(level_part, level_style(entry.level)));
+  }
 
-  if let (Some(file), Some(file_line)) =
-    (&entry.parsed.file, entry.parsed.file_line)
-  {
-    let s = format!("{file}:{file_line}:");
-    width += text_width(&s);
-    spans.push(Span::styled(s, file_style(entry.level)));
+  if display.target {
+    if let Some(target) = &entry.parsed.target {
+      let s = format!("{target}: ");
+      width += text_width(&s);
+      spans.push(Span::styled(s, file_style(entry.level)));
+    }
+  }
+
+  if display.thread_id {
+    if let Some(thread) =
+      entry.parsed.thread_id.as_ref().or(entry.parsed.thread_name.as_ref())
+    {
+      let s = format!("{thread} ");
+      width += text_width(&s);
+      spans.push(Span::styled(s, time_style()));
+    }
+  }
+
+  if display.file {
+    if let (Some(file), Some(file_line)) =
+      (&entry.parsed.file, entry.parsed.file_line)
+    {
+      let s = format!("{file}:{file_line}:");
+      width += text_width(&s);
+      spans.push(Span::styled(s, file_style(entry.level)));
+    }
   }
 
   let target_width = LINE_NUMBER_WIDTH + PREFIX_WIDTH;
@@ -521,10 +549,11 @@ pub fn render_entry_lines(
   entry: &LogEntry,
   total_width: usize,
   pretty_print: bool,
+  display: &DisplayOptions,
   search_re: Option<&Regex>,
   active_match_line: bool,
 ) -> Vec<Line<'static>> {
-  let prefix = build_prefix_spans(line_no, entry);
+  let prefix = build_prefix_spans(line_no, entry, display);
   let body_width =
     total_width.saturating_sub(LINE_NUMBER_WIDTH + PREFIX_WIDTH).max(1);
 
