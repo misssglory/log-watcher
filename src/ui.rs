@@ -72,6 +72,17 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("*", key_style()));
       spans.push(Span::styled(" search", label_style()));
       spans.push(sep());
+      spans.push(Span::styled("v", key_style()));
+      spans.push(Span::styled(" fields", label_style()));
+      spans.push(sep());
+      if tab.folder.is_some() {
+        spans.push(Span::styled("F", key_style()));
+        spans.push(Span::styled(" files", label_style()));
+        spans.push(sep());
+        spans.push(Span::styled("m", key_style()));
+        spans.push(Span::styled(" newest", label_style()));
+        spans.push(sep());
+      }
       spans.push(Span::styled("Tab", key_style()));
       spans.push(Span::styled(" tabs", label_style()));
       spans.push(sep());
@@ -144,6 +155,26 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("Esc", key_style()));
       spans.push(Span::styled(" cancel", label_style()));
     }
+    InputMode::FieldMenu => {
+      spans.push(Span::styled("1-5", key_style()));
+      spans.push(Span::styled(" toggle display fields", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Esc", key_style()));
+      spans.push(Span::styled(" close", label_style()));
+    }
+    InputMode::FolderFilePicker => {
+      spans.push(Span::styled("j/k", key_style()));
+      spans.push(Span::styled(" choose file", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Enter", key_style()));
+      spans.push(Span::styled(" open", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("m", key_style()));
+      spans.push(Span::styled(" follow newest", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Esc", key_style()));
+      spans.push(Span::styled(" close", label_style()));
+    }
     InputMode::CommandOverlay => {
       spans.push(Span::styled("Command overlay", key_style()));
       spans.push(Span::styled(
@@ -179,6 +210,8 @@ fn command_overlay_lines() -> Vec<Line<'static>> {
         ("o", "file or folder tab"),
         ("!", "shell command tab"),
         ("O", "recent picker"),
+        ("F", "folder file picker"),
+        ("m", "follow newest folder file"),
         ("r/R", "refresh current/all"),
       ],
     ),
@@ -213,7 +246,12 @@ fn command_overlay_lines() -> Vec<Line<'static>> {
     ),
     legend(
       "View",
-      &[("p", "pretty print"), ("s", "follow bottom"), ("a", "auto refresh")],
+      &[
+        ("p", "pretty print"),
+        ("v", "field menu"),
+        ("s", "follow bottom"),
+        ("a", "auto refresh"),
+      ],
     ),
     legend("General", &[("? or h", "toggle this overlay"), ("q", "quit")]),
   ]
@@ -255,6 +293,99 @@ fn centered_rect(
       Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(vertical[1])[1]
+}
+
+fn bool_label(value: bool) -> &'static str {
+  if value {
+    "on"
+  } else {
+    "off"
+  }
+}
+
+fn field_menu_lines(tab: &crate::model::LogTab) -> Vec<Line<'static>> {
+  let display = &tab.display;
+  vec![
+    Line::from(Span::styled(
+      "Display fields",
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )),
+    Line::from(""),
+    menu_line("1", "timestamp", bool_label(display.timestamp)),
+    menu_line("2", "level", bool_label(display.level)),
+    menu_line("3", "target", bool_label(display.target)),
+    menu_line("4", "file/line", bool_label(display.file)),
+    menu_line("5", "thread id/name", bool_label(display.thread_id)),
+  ]
+}
+
+fn menu_line(
+  key: &'static str,
+  name: &'static str,
+  value: &'static str,
+) -> Line<'static> {
+  Line::from(vec![
+    Span::styled(format!("{key} "), key_style()),
+    Span::styled(format!("{name:<14}"), label_style()),
+    Span::styled(value, value_style()),
+  ])
+}
+
+fn folder_picker_lines(tab: &crate::model::LogTab) -> Vec<Line<'static>> {
+  let Some(folder) = &tab.folder else {
+    return vec![Line::from(Span::styled(
+      "Current tab is not a folder",
+      dim_style(),
+    ))];
+  };
+  if folder.files.is_empty() {
+    return vec![Line::from(Span::styled("No files in folder", dim_style()))];
+  }
+  let mut lines = vec![Line::from(vec![
+    Span::styled("Files by modification time ", label_style()),
+    Span::styled(
+      format!("follow newest: {}", bool_label(folder.follow_newest)),
+      value_style(),
+    ),
+  ])];
+  for (idx, file) in folder.files.iter().enumerate() {
+    let marker = if idx == folder.picker_selected { "> " } else { "  " };
+    let suffix = if idx == folder.selected { " (current)" } else { "" };
+    let style = if idx == folder.picker_selected {
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+      value_style()
+    };
+    lines.push(Line::from(vec![
+      Span::styled(marker, key_style()),
+      Span::styled(format!("{}{}", file.label, suffix), style),
+    ]));
+  }
+  lines
+}
+
+fn recent_picker_lines(app: &App) -> Vec<Line<'static>> {
+  if app.recents.is_empty() {
+    return vec![Line::from(Span::styled("No recents yet", dim_style()))];
+  }
+
+  app
+    .recents
+    .iter()
+    .enumerate()
+    .map(|(idx, item)| {
+      let marker = if idx == app.recent_selected { "> " } else { "  " };
+      let style = if idx == app.recent_selected {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+      } else {
+        value_style()
+      };
+      Line::from(vec![
+        Span::styled(marker, key_style()),
+        Span::styled(input::recent_label(item), style),
+      ])
+    })
+    .collect::<Vec<_>>()
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -300,37 +431,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
   let start_idx = current.saturating_sub(visible_count.saturating_sub(1));
   let end_idx = (start_idx + visible_count).min(tab.rendered_lines.len());
 
-  let rendered = if app.input_mode == InputMode::RecentPicker {
-    if app.recents.is_empty() {
-      vec![Line::from(Span::styled("No recents yet", dim_style()))]
-    } else {
-      app
-        .recents
-        .iter()
-        .enumerate()
-        .map(|(idx, item)| {
-          let marker = if idx == app.recent_selected { "> " } else { "  " };
-          let style = if idx == app.recent_selected {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-          } else {
-            value_style()
-          };
-          Line::from(vec![
-            Span::styled(marker, key_style()),
-            Span::styled(input::recent_label(item), style),
-          ])
-        })
-        .collect::<Vec<_>>()
-    }
-  } else {
-    tab.rendered_lines[start_idx..end_idx]
+  let rendered = match app.input_mode {
+    InputMode::RecentPicker => recent_picker_lines(app),
+    InputMode::FieldMenu => field_menu_lines(tab),
+    InputMode::FolderFilePicker => folder_picker_lines(tab),
+    _ => tab.rendered_lines[start_idx..end_idx]
       .iter()
       .map(|rl| rl.line.clone())
-      .collect::<Vec<_>>()
+      .collect::<Vec<_>>(),
   };
 
+  let title = tab
+    .rendered_lines
+    .get(current)
+    .and_then(|line| line.source_file.as_deref())
+    .map(|source_file| format!("{} — {source_file}", tab.name))
+    .unwrap_or_else(|| tab.title());
+
   let paragraph = Paragraph::new(rendered)
-    .block(Block::default().borders(Borders::ALL).title(tab.title()))
+    .block(Block::default().borders(Borders::ALL).title(title))
     .wrap(Wrap { trim: false });
 
   frame.render_widget(paragraph, chunks[1]);

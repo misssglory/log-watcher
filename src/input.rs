@@ -179,6 +179,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     InputMode::OpenFile => handle_open_file_input(app, key),
     InputMode::OpenCommand => handle_open_command_input(app, key),
     InputMode::RecentPicker => handle_recent_picker(app, key),
+    InputMode::FieldMenu => handle_field_menu(app, key),
+    InputMode::FolderFilePicker => handle_folder_file_picker(app, key),
     InputMode::CommandOverlay => handle_command_overlay(app, key),
   }
 }
@@ -255,6 +257,20 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     KeyCode::Char('O') => {
       app.recent_selected = 0;
       app.input_mode = InputMode::RecentPicker;
+    }
+    KeyCode::Char('v') => {
+      app.input_mode = InputMode::FieldMenu;
+    }
+    KeyCode::Char('F') => {
+      if let Some(folder) = &mut app.current_tab_mut().folder {
+        folder.picker_selected = folder.selected;
+        app.input_mode = InputMode::FolderFilePicker;
+      } else {
+        app.status = "Current tab is not a folder".into();
+      }
+    }
+    KeyCode::Char('m') => {
+      app.toggle_follow_newest_file()?;
     }
     KeyCode::Char('/') => {
       app.input_buffer.clear();
@@ -526,4 +542,49 @@ pub fn recent_label(item: &RecentItem) -> String {
     RecentItem::Folder(path) => format!("folder {}", path.display()),
     RecentItem::Command(command) => format!("cmd    {command}"),
   }
+}
+
+fn handle_field_menu(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc | KeyCode::Char('v') => app.input_mode = InputMode::Normal,
+    KeyCode::Char(c @ ('1'..='5')) => app.toggle_display_field(c),
+    _ => {}
+  }
+  Ok(())
+}
+
+fn handle_folder_file_picker(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc | KeyCode::Char('F') => app.input_mode = InputMode::Normal,
+    KeyCode::Down | KeyCode::Char('j') => {
+      if let Some(folder) = &mut app.current_tab_mut().folder {
+        folder.picker_selected = (folder.picker_selected + 1)
+          .min(folder.files.len().saturating_sub(1));
+      }
+    }
+    KeyCode::Up | KeyCode::Char('k') => {
+      if let Some(folder) = &mut app.current_tab_mut().folder {
+        folder.picker_selected = folder.picker_selected.saturating_sub(1);
+      }
+    }
+    KeyCode::Home | KeyCode::Char('g') => {
+      if let Some(folder) = &mut app.current_tab_mut().folder {
+        folder.picker_selected = 0;
+      }
+    }
+    KeyCode::End | KeyCode::Char('G') => {
+      if let Some(folder) = &mut app.current_tab_mut().folder {
+        folder.picker_selected = folder.files.len().saturating_sub(1);
+      }
+    }
+    KeyCode::Char('m') => {
+      app.toggle_follow_newest_file()?;
+    }
+    KeyCode::Enter => {
+      app.select_folder_picker_file()?;
+      app.input_mode = InputMode::Normal;
+    }
+    _ => {}
+  }
+  Ok(())
 }

@@ -1,6 +1,6 @@
 use regex::Regex;
 use std::{
-  path::PathBuf,
+  path::{Path, PathBuf},
   process::Child,
   sync::mpsc::{Receiver, TryRecvError},
   time::Instant,
@@ -44,8 +44,11 @@ impl LogLevel {
 pub struct ParsedPrefix {
   pub time: Option<String>,
   pub level_text: Option<String>,
+  pub target: Option<String>,
   pub file: Option<String>,
   pub file_line: Option<usize>,
+  pub thread_id: Option<String>,
+  pub thread_name: Option<String>,
   pub message: String,
 }
 
@@ -54,6 +57,7 @@ pub struct LogEntry {
   pub raw: String,
   pub level: LogLevel,
   pub parsed: ParsedPrefix,
+  pub source_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -74,6 +78,56 @@ pub struct ScrollState {
   pub follow_bottom: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DisplayOptions {
+  pub timestamp: bool,
+  pub level: bool,
+  pub target: bool,
+  pub file: bool,
+  pub thread_id: bool,
+}
+
+impl Default for DisplayOptions {
+  fn default() -> Self {
+    Self {
+      timestamp: true,
+      level: true,
+      target: true,
+      file: true,
+      thread_id: false,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FolderFile {
+  pub path: PathBuf,
+  pub label: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FolderState {
+  pub files: Vec<FolderFile>,
+  pub selected: usize,
+  pub picker_selected: usize,
+  pub follow_newest: bool,
+}
+
+impl FolderState {
+  pub fn current_file(&self) -> Option<&FolderFile> {
+    self.files.get(self.selected)
+  }
+
+  pub fn select_by_path(&mut self, path: &Path) {
+    if let Some(pos) = self.files.iter().position(|file| file.path == path) {
+      self.selected = pos;
+    } else {
+      self.selected = 0;
+    }
+    self.picker_selected = self.selected;
+  }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchState {
   pub regex: Option<Regex>,
@@ -86,6 +140,7 @@ pub struct RenderedLine {
   pub line: Line<'static>,
   pub source_entry_idx: usize,
   pub source_real_line_no: usize,
+  pub source_file: Option<String>,
   pub is_first_visual_line: bool,
 }
 
@@ -158,7 +213,9 @@ pub struct LogTab {
   pub last_update: Instant,
   pub auto_refresh: bool,
   pub pretty_print: bool,
+  pub display: DisplayOptions,
   pub search: SearchState,
+  pub folder: Option<FolderState>,
   pub filter_job: Option<FilterJob>,
   pub paging: Option<PagingState>,
 }
@@ -167,7 +224,15 @@ impl LogTab {
   pub fn title(&self) -> String {
     match &self.source {
       TabSource::File(path) => path.to_string_lossy().to_string(),
-      TabSource::Folder(path) => format!("folder {}", path.to_string_lossy()),
+      TabSource::Folder(path) => {
+        let current = self
+          .folder
+          .as_ref()
+          .and_then(|folder| folder.current_file())
+          .map(|file| file.label.as_str())
+          .unwrap_or("no files");
+        format!("folder {} — {current}", path.to_string_lossy())
+      }
       TabSource::Command(stream) => format!("$ {}", stream.command),
     }
   }
@@ -184,6 +249,8 @@ pub enum InputMode {
   OpenFile,
   OpenCommand,
   RecentPicker,
+  FieldMenu,
+  FolderFilePicker,
   CommandOverlay,
 }
 
