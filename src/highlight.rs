@@ -23,7 +23,6 @@ fn level_color(level: LogLevel) -> Color {
     LogLevel::Info => Color::Green,
     LogLevel::Warn => Color::Yellow,
     LogLevel::Error => Color::Red,
-    LogLevel::Unknown => Color::White,
   }
 }
 
@@ -38,7 +37,6 @@ fn file_style(level: LogLevel) -> Style {
     LogLevel::Info => Style::default().fg(Color::LightBlue),
     LogLevel::Debug => Style::default().fg(Color::LightCyan),
     LogLevel::Trace => Style::default().fg(Color::Gray),
-    LogLevel::Unknown => Style::default().fg(Color::White),
   }
 }
 

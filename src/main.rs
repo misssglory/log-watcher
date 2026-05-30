@@ -1,4 +1,5 @@
 mod app;
+mod cache;
 mod file_source;
 mod filter;
 mod highlight;

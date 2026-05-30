@@ -1,58 +1,87 @@
-use std::{fs, path::PathBuf, sync::OnceLock, time::Instant};
+use std::{
+  fs,
+  io::{BufRead, BufReader},
+  path::PathBuf,
+  process::{Command, Stdio},
+  sync::{mpsc, OnceLock},
+  thread,
+  time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
 use regex::Regex;
 
 use crate::{
-  file_source, filter, highlight,
+  cache, file_source, filter, highlight,
   model::{
-    App, DeletePreview, Filters, InputMode, LogEntry, LogLevel, LogTab,
-    ParsedPrefix, RenderedLine, ScrollState, SearchState,
+    App, CommandStream, DeletePreview, Filters, InputMode, LogEntry, LogLevel,
+    LogTab, ParsedPrefix, RecentItem, RenderedLine, ScrollState, SearchState,
+    TabSource,
   },
 };
 
 impl App {
   pub fn new(paths: Vec<PathBuf>) -> Result<Self> {
-    let mut tabs = Vec::new();
-
-    for path in paths {
-      let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string_lossy().to_string());
-
-      let content = fs::read_to_string(&path).unwrap_or_default();
-      let entries = content.lines().map(build_entry).collect::<Vec<_>>();
-
-      let mut tab = LogTab {
-        name,
-        path,
-        entries,
-        filtered_indices: Vec::new(),
-        rendered_lines: Vec::new(),
-        last_render_width: 0,
-        filters: Filters::default(),
-        delete_preview: DeletePreview::default(),
-        scroll: ScrollState { offset: 0, follow_bottom: true },
-        last_update: Instant::now(),
-        auto_refresh: true,
-        pretty_print: true,
-        search: SearchState::default(),
-      };
-
-      filter::recompute_tab(&mut tab);
-      tabs.push(tab);
-    }
-
-    Ok(Self {
-      tabs,
+    let mut app = Self {
+      tabs: Vec::new(),
       selected_tab: 0,
       should_quit: false,
       input_mode: InputMode::Normal,
       input_buffer: String::new(),
       input_cursor: 0,
       status: "Ready".into(),
-    })
+      recents: cache::load_recents(),
+      recent_selected: 0,
+    };
+
+    for path in paths {
+      if let Err(err) = app.open_file_tab(path) {
+        app.status = format!("Open failed: {err}");
+      }
+    }
+
+    if app.tabs.is_empty() {
+      app.open_file_tab("app.log".into())?;
+    }
+
+    Ok(app)
+  }
+
+  fn make_file_tab(path: PathBuf) -> Result<LogTab> {
+    let name = path
+      .file_name()
+      .map(|s| s.to_string_lossy().to_string())
+      .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    let content = fs::read_to_string(&path).unwrap_or_default();
+    let entries = content.lines().map(build_entry).collect::<Vec<_>>();
+    Ok(Self::make_tab(name, TabSource::File(path), entries, true))
+  }
+
+  fn make_tab(
+    name: String,
+    source: TabSource,
+    entries: Vec<LogEntry>,
+    auto_refresh: bool,
+  ) -> LogTab {
+    let mut tab = LogTab {
+      name,
+      source,
+      entries,
+      filtered_indices: Vec::new(),
+      rendered_lines: Vec::new(),
+      last_render_width: 0,
+      filters: Filters::default(),
+      delete_preview: DeletePreview::default(),
+      scroll: ScrollState { offset: 0, follow_bottom: true },
+      last_update: Instant::now(),
+      auto_refresh,
+      pretty_print: true,
+      search: SearchState::default(),
+    };
+
+    filter::recompute_tab(&mut tab);
+    tab
   }
 
   pub fn current_tab(&self) -> &LogTab {
@@ -63,25 +92,138 @@ impl App {
     &mut self.tabs[self.selected_tab]
   }
 
+  pub fn open_file_tab(&mut self, path: PathBuf) -> Result<()> {
+    let tab = Self::make_file_tab(path.clone())?;
+    self.tabs.push(tab);
+    self.selected_tab = self.tabs.len() - 1;
+    cache::remember_recent(&mut self.recents, RecentItem::File(path.clone()));
+    let _ = cache::save_recents(&self.recents);
+    self.status = format!("Opened {}", path.display());
+    Ok(())
+  }
+
+  pub fn open_command_tab(&mut self, command: String) -> Result<()> {
+    let mut child = Command::new("sh")
+      .arg("-c")
+      .arg(&command)
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = mpsc::channel();
+
+    if let Some(stdout) = stdout {
+      let tx = tx.clone();
+      thread::spawn(move || stream_reader(stdout, tx, LogLevel::Info));
+    }
+
+    if let Some(stderr) = stderr {
+      thread::spawn(move || stream_reader(stderr, tx, LogLevel::Error));
+    }
+
+    let short = command.chars().take(18).collect::<String>();
+    let name = if command.chars().count() > 18 {
+      format!("$ {short}…")
+    } else {
+      format!("$ {command}")
+    };
+    let stream =
+      CommandStream { command: command.clone(), child, rx, finished: false };
+    let tab =
+      Self::make_tab(name, TabSource::Command(stream), Vec::new(), true);
+    self.tabs.push(tab);
+    self.selected_tab = self.tabs.len() - 1;
+    cache::remember_recent(
+      &mut self.recents,
+      RecentItem::Command(command.clone()),
+    );
+    let _ = cache::save_recents(&self.recents);
+    self.status = format!("Started command: {command}");
+    Ok(())
+  }
+
+  pub fn open_recent_selected(&mut self) -> Result<()> {
+    let Some(item) = self.recents.get(self.recent_selected).cloned() else {
+      self.status = "No recents".into();
+      return Ok(());
+    };
+
+    match item {
+      RecentItem::File(path) => self.open_file_tab(path),
+      RecentItem::Command(command) => self.open_command_tab(command),
+    }
+  }
+
   pub fn refresh_current(&mut self) -> Result<()> {
     let tab = self.current_tab_mut();
-    file_source::reload_tab(tab)?;
-    self.status = format!("Updated {}", tab.name);
+    match &tab.source {
+      TabSource::File(_) => {
+        file_source::reload_tab(tab)?;
+        self.status = format!("Updated {}", tab.name);
+      }
+      TabSource::Command(_) => {
+        self.status = "Command tabs update automatically".into();
+      }
+    }
     Ok(())
   }
 
   pub fn refresh_all(&mut self) -> Result<()> {
     for tab in &mut self.tabs {
-      file_source::reload_tab(tab)?;
+      if matches!(tab.source, TabSource::File(_)) {
+        file_source::reload_tab(tab)?;
+      }
     }
-    self.status = "Updated all tabs".into();
+    self.status = "Updated all file tabs".into();
     Ok(())
   }
 
   pub fn poll_file_updates(&mut self) -> Result<()> {
     for tab in &mut self.tabs {
-      if tab.auto_refresh && file_source::has_file_changed(tab)? {
-        file_source::reload_tab(tab)?;
+      if !tab.auto_refresh {
+        continue;
+      }
+
+      if matches!(tab.source, TabSource::File(_)) {
+        if file_source::has_file_changed(tab)? {
+          file_source::reload_tab(tab)?;
+        }
+        continue;
+      }
+
+      let TabSource::Command(stream) = &mut tab.source else {
+        continue;
+      };
+
+      let mut changed = false;
+      while let Ok(line) = stream.rx.try_recv() {
+        tab.entries.push(build_entry(&line));
+        changed = true;
+      }
+
+      if !stream.finished {
+        if let Some(status) = stream.child.try_wait()? {
+          stream.finished = true;
+          let level =
+            if status.success() { LogLevel::Info } else { LogLevel::Error };
+          tab.entries.push(build_entry(&format_tracing_line(
+            level,
+            &format!("command exited with {status}"),
+          )));
+          changed = true;
+        }
+      }
+
+      if changed {
+        tab.last_update = Instant::now();
+        filter::recompute_tab(tab);
+        tab.rendered_lines.clear();
+        tab.last_render_width = 0;
+        if tab.scroll.follow_bottom {
+          tab.scroll.offset = tab.filtered_indices.len().saturating_sub(1);
+        }
       }
     }
     Ok(())
@@ -271,6 +413,23 @@ impl App {
 
     self.status = "No matches".into();
   }
+}
+
+fn stream_reader<R>(reader: R, tx: mpsc::Sender<String>, level: LogLevel)
+where
+  R: std::io::Read,
+{
+  for line in BufReader::new(reader).lines().map_while(Result::ok) {
+    if tx.send(format_tracing_line(level, &line)).is_err() {
+      break;
+    }
+  }
+}
+
+fn format_tracing_line(level: LogLevel, message: &str) -> String {
+  let ts =
+    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+  format!("1970-01-01T{ts}.000Z {} command:1: {}", level.as_str(), message)
 }
 
 pub fn build_entry(line: &str) -> LogEntry {

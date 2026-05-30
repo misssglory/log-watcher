@@ -1,5 +1,5 @@
 use regex::Regex;
-use std::{path::PathBuf, time::Instant};
+use std::{path::PathBuf, process::Child, sync::mpsc::Receiver, time::Instant};
 
 use ratatui::text::Line;
 
@@ -10,7 +10,6 @@ pub enum LogLevel {
   Info,
   Warn,
   Error,
-  Unknown,
 }
 
 impl LogLevel {
@@ -22,7 +21,6 @@ impl LogLevel {
       Info => Some(Warn),
       Warn => Some(Error),
       Error => None,
-      Unknown => Some(Trace),
     }
   }
 
@@ -33,7 +31,6 @@ impl LogLevel {
       LogLevel::Info => "INFO",
       LogLevel::Warn => "WARN",
       LogLevel::Error => "ERROR",
-      LogLevel::Unknown => "UNKNOWN",
     }
   }
 }
@@ -87,10 +84,30 @@ pub struct RenderedLine {
   pub is_first_visual_line: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecentItem {
+  File(PathBuf),
+  Command(String),
+}
+
+#[derive(Debug)]
+pub struct CommandStream {
+  pub command: String,
+  pub child: Child,
+  pub rx: Receiver<String>,
+  pub finished: bool,
+}
+
+#[derive(Debug)]
+pub enum TabSource {
+  File(PathBuf),
+  Command(CommandStream),
+}
+
 #[derive(Debug)]
 pub struct LogTab {
   pub name: String,
-  pub path: PathBuf,
+  pub source: TabSource,
   pub entries: Vec<LogEntry>,
   pub filtered_indices: Vec<usize>,
   pub rendered_lines: Vec<RenderedLine>,
@@ -104,6 +121,15 @@ pub struct LogTab {
   pub search: SearchState,
 }
 
+impl LogTab {
+  pub fn title(&self) -> String {
+    match &self.source {
+      TabSource::File(path) => path.to_string_lossy().to_string(),
+      TabSource::Command(stream) => format!("$ {}", stream.command),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
   Normal,
@@ -112,6 +138,9 @@ pub enum InputMode {
   SearchRegex,
   ConfirmDelete,
   JumpToLine,
+  OpenFile,
+  OpenCommand,
+  RecentPicker,
   Help,
 }
 
@@ -123,4 +152,6 @@ pub struct App {
   pub input_buffer: String,
   pub input_cursor: usize,
   pub status: String,
+  pub recents: Vec<RecentItem>,
+  pub recent_selected: usize,
 }
