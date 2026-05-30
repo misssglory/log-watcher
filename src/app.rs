@@ -1,5 +1,4 @@
 use std::{
-  fs,
   io::{BufRead, BufReader},
   path::PathBuf,
   process::{Command, Stdio},
@@ -53,9 +52,22 @@ impl App {
       .map(|s| s.to_string_lossy().to_string())
       .unwrap_or_else(|| path.to_string_lossy().to_string());
 
-    let content = fs::read_to_string(&path).unwrap_or_default();
-    let entries = content.lines().map(build_entry).collect::<Vec<_>>();
-    Ok(Self::make_tab(name, TabSource::File(path), entries, true))
+    let (entries, paging) = file_source::load_file_entries(&path)?;
+    let mut tab = Self::make_tab(name, TabSource::File(path), entries, true);
+    tab.paging = Some(paging);
+    Ok(tab)
+  }
+
+  fn make_folder_tab(path: PathBuf) -> Result<LogTab> {
+    let name = path
+      .file_name()
+      .map(|s| format!("{}/", s.to_string_lossy()))
+      .unwrap_or_else(|| path.to_string_lossy().to_string());
+
+    let (entries, paging) = file_source::load_folder_entries(&path)?;
+    let mut tab = Self::make_tab(name, TabSource::Folder(path), entries, false);
+    tab.paging = Some(paging);
+    Ok(tab)
   }
 
   fn make_tab(
@@ -78,6 +90,8 @@ impl App {
       auto_refresh,
       pretty_print: true,
       search: SearchState::default(),
+      filter_job: None,
+      paging: None,
     };
 
     filter::recompute_tab(&mut tab);
@@ -93,12 +107,26 @@ impl App {
   }
 
   pub fn open_file_tab(&mut self, path: PathBuf) -> Result<()> {
+    if path.is_dir() {
+      return self.open_folder_tab(path);
+    }
+
     let tab = Self::make_file_tab(path.clone())?;
     self.tabs.push(tab);
     self.selected_tab = self.tabs.len() - 1;
     cache::remember_recent(&mut self.recents, RecentItem::File(path.clone()));
     let _ = cache::save_recents(&self.recents);
     self.status = format!("Opened {}", path.display());
+    Ok(())
+  }
+
+  pub fn open_folder_tab(&mut self, path: PathBuf) -> Result<()> {
+    let tab = Self::make_folder_tab(path.clone())?;
+    self.tabs.push(tab);
+    self.selected_tab = self.tabs.len() - 1;
+    cache::remember_recent(&mut self.recents, RecentItem::Folder(path.clone()));
+    let _ = cache::save_recents(&self.recents);
+    self.status = format!("Opened folder {} newest to oldest", path.display());
     Ok(())
   }
 
@@ -152,6 +180,7 @@ impl App {
 
     match item {
       RecentItem::File(path) => self.open_file_tab(path),
+      RecentItem::Folder(path) => self.open_folder_tab(path),
       RecentItem::Command(command) => self.open_command_tab(command),
     }
   }
@@ -159,7 +188,7 @@ impl App {
   pub fn refresh_current(&mut self) -> Result<()> {
     let tab = self.current_tab_mut();
     match &tab.source {
-      TabSource::File(_) => {
+      TabSource::File(_) | TabSource::Folder(_) => {
         file_source::reload_tab(tab)?;
         self.status = format!("Updated {}", tab.name);
       }
@@ -172,7 +201,7 @@ impl App {
 
   pub fn refresh_all(&mut self) -> Result<()> {
     for tab in &mut self.tabs {
-      if matches!(tab.source, TabSource::File(_)) {
+      if matches!(tab.source, TabSource::File(_) | TabSource::Folder(_)) {
         file_source::reload_tab(tab)?;
       }
     }
@@ -182,11 +211,16 @@ impl App {
 
   pub fn poll_file_updates(&mut self) -> Result<()> {
     for tab in &mut self.tabs {
+      if filter::poll_filter_job(tab) {
+        self.status =
+          format!("Filtered {} visible lines", tab.filtered_indices.len());
+      }
+
       if !tab.auto_refresh {
         continue;
       }
 
-      if matches!(tab.source, TabSource::File(_)) {
+      if matches!(tab.source, TabSource::File(_) | TabSource::Folder(_)) {
         if file_source::has_file_changed(tab)? {
           file_source::reload_tab(tab)?;
         }
@@ -242,7 +276,7 @@ impl App {
     let re = Regex::new(pattern)?;
     let tab = self.current_tab_mut();
     tab.filters.delete_regex = Some(re);
-    filter::recompute_delete_preview(tab);
+    filter::recompute_tab(tab);
     Ok(())
   }
 
@@ -299,9 +333,8 @@ impl App {
     tab.rendered_lines = lines;
     tab.last_render_width = width;
 
-    if tab.scroll.follow_bottom {
-      tab.scroll.offset = tab.rendered_lines.len().saturating_sub(1);
-    } else if tab.scroll.offset >= tab.rendered_lines.len() {
+    if tab.scroll.follow_bottom || tab.scroll.offset >= tab.rendered_lines.len()
+    {
       tab.scroll.offset = tab.rendered_lines.len().saturating_sub(1);
     }
   }

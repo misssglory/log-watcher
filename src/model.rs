@@ -1,5 +1,10 @@
 use regex::Regex;
-use std::{path::PathBuf, process::Child, sync::mpsc::Receiver, time::Instant};
+use std::{
+  path::PathBuf,
+  process::Child,
+  sync::mpsc::{Receiver, TryRecvError},
+  time::Instant,
+};
 
 use ratatui::text::Line;
 
@@ -87,6 +92,7 @@ pub struct RenderedLine {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecentItem {
   File(PathBuf),
+  Folder(PathBuf),
   Command(String),
 }
 
@@ -101,10 +107,44 @@ pub struct CommandStream {
 #[derive(Debug)]
 pub enum TabSource {
   File(PathBuf),
+  Folder(PathBuf),
   Command(CommandStream),
 }
 
 #[derive(Debug)]
+pub struct FilterProgress {
+  pub done: usize,
+  pub total: usize,
+}
+
+pub enum FilterUpdate {
+  Progress(FilterProgress),
+  Complete { filtered_indices: Vec<usize>, delete_matches: usize },
+}
+
+pub struct FilterJob {
+  pub rx: Receiver<FilterUpdate>,
+  pub progress: FilterProgress,
+}
+
+impl std::fmt::Debug for FilterJob {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("FilterJob")
+      .field(
+        "progress",
+        &format_args!("{}/{}", self.progress.done, self.progress.total),
+      )
+      .finish_non_exhaustive()
+  }
+}
+
+pub struct PagingState {
+  pub loaded_files: usize,
+  pub total_files: usize,
+  pub truncated_files: usize,
+  pub max_lines_per_file: usize,
+}
+
 pub struct LogTab {
   pub name: String,
   pub source: TabSource,
@@ -119,12 +159,15 @@ pub struct LogTab {
   pub auto_refresh: bool,
   pub pretty_print: bool,
   pub search: SearchState,
+  pub filter_job: Option<FilterJob>,
+  pub paging: Option<PagingState>,
 }
 
 impl LogTab {
   pub fn title(&self) -> String {
     match &self.source {
       TabSource::File(path) => path.to_string_lossy().to_string(),
+      TabSource::Folder(path) => format!("folder {}", path.to_string_lossy()),
       TabSource::Command(stream) => format!("$ {}", stream.command),
     }
   }
@@ -141,7 +184,7 @@ pub enum InputMode {
   OpenFile,
   OpenCommand,
   RecentPicker,
-  Help,
+  CommandOverlay,
 }
 
 pub struct App {
@@ -154,4 +197,30 @@ pub struct App {
   pub status: String,
   pub recents: Vec<RecentItem>,
   pub recent_selected: usize,
+}
+
+impl FilterJob {
+  pub fn drain(&mut self) -> Option<(Vec<usize>, usize)> {
+    let mut completed = None;
+    loop {
+      match self.rx.try_recv() {
+        Ok(FilterUpdate::Progress(progress)) => self.progress = progress,
+        Ok(FilterUpdate::Complete { filtered_indices, delete_matches }) => {
+          self.progress.done = self.progress.total;
+          completed = Some((filtered_indices, delete_matches));
+        }
+        Err(TryRecvError::Empty) => break,
+        Err(TryRecvError::Disconnected) => break,
+      }
+    }
+    completed
+  }
+
+  pub fn percent(&self) -> u16 {
+    if self.progress.total == 0 {
+      return 100;
+    }
+    ((self.progress.done.saturating_mul(100) / self.progress.total).min(100))
+      as u16
+  }
 }

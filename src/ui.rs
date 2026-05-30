@@ -2,7 +2,7 @@ use ratatui::{
   layout::{Constraint, Direction, Layout},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Paragraph, Tabs, Wrap},
+  widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap},
   Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -24,14 +24,6 @@ fn value_style() -> Style {
 
 fn dim_style() -> Style {
   Style::default().fg(Color::DarkGray)
-}
-
-fn bool_style(v: bool) -> Style {
-  if v {
-    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
-  } else {
-    Style::default().fg(Color::DarkGray)
-  }
 }
 
 fn sep() -> Span<'static> {
@@ -68,88 +60,49 @@ fn footer_line(app: &App) -> Line<'static> {
 
   match app.input_mode {
     InputMode::Normal => {
+      spans.push(Span::styled("?", key_style()));
+      spans.push(Span::styled(" commands", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("o", key_style()));
+      spans.push(Span::styled(" open file/folder", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("/", key_style()));
+      spans.push(Span::styled(" filter", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("*", key_style()));
+      spans.push(Span::styled(" search", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Tab", key_style()));
+      spans.push(Span::styled(" tabs", label_style()));
+      spans.push(sep());
       spans.push(Span::styled("q", key_style()));
       spans.push(Span::styled(" quit", label_style()));
       spans.push(sep());
 
-      spans.push(Span::styled("Tab", key_style()));
-      spans.push(Span::styled(" tabs", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("o", key_style()));
-      spans.push(Span::styled(" open", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("!", key_style()));
-      spans.push(Span::styled(" cmd", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("O", key_style()));
-      spans.push(Span::styled(" recents", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("j/k", key_style()));
-      spans.push(Span::styled(" move", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("g/G", key_style()));
-      spans.push(Span::styled(" top/bot", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled(":", key_style()));
-      spans.push(Span::styled(" jump", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("/", key_style()));
-      spans.push(Span::styled(" filter", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("*", key_style()));
-      spans.push(Span::styled(" search", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("n/N", key_style()));
-      spans.push(Span::styled(" next/prev", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("p", key_style()));
-      spans.push(Span::styled(" pretty=", label_style()));
-      spans.push(Span::styled(
-        format!("{}", tab.pretty_print),
-        bool_style(tab.pretty_print),
-      ));
-      spans.push(sep());
-
-      spans.push(Span::styled("a", key_style()));
-      spans.push(Span::styled(" auto=", label_style()));
-      spans.push(Span::styled(
-        format!("{}", tab.auto_refresh),
-        bool_style(tab.auto_refresh),
-      ));
-      spans.push(sep());
-
-      spans.push(Span::styled("s", key_style()));
-      spans.push(Span::styled(" follow=", label_style()));
-      spans.push(Span::styled(
-        format!("{}", tab.scroll.follow_bottom),
-        bool_style(tab.scroll.follow_bottom),
-      ));
-      spans.push(sep());
-
-      spans.push(Span::styled("search=", label_style()));
-      if tab.search.pattern.is_empty() {
-        spans.push(Span::styled("-", dim_style()));
-      } else {
-        spans.push(Span::styled(tab.search.pattern.clone(), value_style()));
+      if let Some(job) = &tab.filter_job {
+        spans.push(Span::styled("filter ", label_style()));
+        spans.push(progress_span(job.percent()));
+        spans.push(Span::styled(format!(" {}%", job.percent()), value_style()));
+        spans.push(sep());
       }
-      spans.push(sep());
 
-      spans.push(Span::styled("dp=", label_style()));
-      spans.push(Span::styled(
-        tab.delete_preview.matches.to_string(),
-        value_style(),
-      ));
-      spans.push(sep());
+      if let Some(paging) = &tab.paging {
+        spans.push(Span::styled("files=", label_style()));
+        spans.push(Span::styled(
+          format!("{}/{}", paging.loaded_files, paging.total_files),
+          value_style(),
+        ));
+        if paging.truncated_files > 0 {
+          spans.push(Span::styled(
+            format!(
+              " paged {}×{} lines",
+              paging.truncated_files, paging.max_lines_per_file
+            ),
+            Style::default().fg(Color::Yellow),
+          ));
+        }
+        spans.push(sep());
+      }
 
       spans.push(Span::styled("status=", label_style()));
       spans.push(Span::styled(app.status.clone(), value_style()));
@@ -162,6 +115,9 @@ fn footer_line(app: &App) -> Line<'static> {
     | InputMode::OpenCommand => {
       spans.push(Span::styled(input_prefix(app.input_mode), key_style()));
       spans.push(Span::styled(app.input_buffer.clone(), value_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Esc", key_style()));
+      spans.push(Span::styled(" cancel", label_style()));
     }
     InputMode::ConfirmDelete => {
       spans.push(Span::styled("D", key_style()));
@@ -188,37 +144,117 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled("Esc", key_style()));
       spans.push(Span::styled(" cancel", label_style()));
     }
-    InputMode::Help => {
-      spans.push(Span::styled("q", key_style()));
-      spans.push(Span::styled(" quit", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("Tab", key_style()));
-      spans.push(Span::styled(" tabs", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("o", key_style()));
-      spans.push(Span::styled(" open", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("!", key_style()));
-      spans.push(Span::styled(" cmd", label_style()));
-      spans.push(sep());
-
-      spans.push(Span::styled("O", key_style()));
-      spans.push(Span::styled(" recents", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("j/k", key_style()));
-      spans.push(Span::styled(" move", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("Ctrl+←/→", key_style()));
-      spans.push(Span::styled(" word", label_style()));
-      spans.push(sep());
-      spans.push(Span::styled("Shift+Bksp/Del", key_style()));
-      spans.push(Span::styled(" chunk-del", label_style()));
+    InputMode::CommandOverlay => {
+      spans.push(Span::styled("Command overlay", key_style()));
+      spans.push(Span::styled(
+        " — press any listed key to run it, Esc to close",
+        label_style(),
+      ));
     }
   }
 
   Line::from(spans)
+}
+
+fn progress_span(percent: u16) -> Span<'static> {
+  let width = 12usize;
+  let filled = (usize::from(percent) * width / 100).min(width);
+  let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(width - filled));
+  Span::styled(
+    bar,
+    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+  )
+}
+
+fn command_overlay_lines() -> Vec<Line<'static>> {
+  vec![
+    Line::from(Span::styled(
+      "Commands",
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )),
+    Line::from(""),
+    legend(
+      "Open",
+      &[
+        ("o", "file or folder tab"),
+        ("!", "shell command tab"),
+        ("O", "recent picker"),
+        ("r/R", "refresh current/all"),
+      ],
+    ),
+    legend(
+      "Navigate",
+      &[
+        ("j/k", "line up/down"),
+        ("f/b", "page down/up"),
+        ("g/G", "top/bottom"),
+        ("Tab", "next tab"),
+        ("Shift+Tab", "previous tab"),
+        (":", "jump to line"),
+      ],
+    ),
+    legend(
+      "Filter",
+      &[
+        ("/", "include regex"),
+        ("l", "cycle min level"),
+        ("x", "delete preview regex"),
+        ("D", "delete matches"),
+        ("c", "clear filters"),
+      ],
+    ),
+    legend(
+      "Search",
+      &[
+        ("*", "search regex"),
+        ("n/N", "next/previous match"),
+        ("C", "clear search"),
+      ],
+    ),
+    legend(
+      "View",
+      &[("p", "pretty print"), ("s", "follow bottom"), ("a", "auto refresh")],
+    ),
+    legend("General", &[("? or h", "toggle this overlay"), ("q", "quit")]),
+  ]
+}
+
+fn legend(
+  title: &'static str,
+  items: &[(&'static str, &'static str)],
+) -> Line<'static> {
+  let mut spans = vec![Span::styled(format!("{title:<9}"), label_style())];
+  for (idx, (key, label)) in items.iter().enumerate() {
+    if idx > 0 {
+      spans.push(Span::styled("   ", dim_style()));
+    }
+    spans.push(Span::styled(*key, key_style()));
+    spans.push(Span::styled(format!(" {label}"), value_style()));
+  }
+  Line::from(spans)
+}
+
+fn centered_rect(
+  percent_x: u16,
+  percent_y: u16,
+  area: ratatui::layout::Rect,
+) -> ratatui::layout::Rect {
+  let vertical = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Percentage((100 - percent_y) / 2),
+      Constraint::Percentage(percent_y),
+      Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+  Layout::default()
+    .direction(Direction::Horizontal)
+    .constraints([
+      Constraint::Percentage((100 - percent_x) / 2),
+      Constraint::Percentage(percent_x),
+      Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -298,6 +334,15 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     .wrap(Wrap { trim: false });
 
   frame.render_widget(paragraph, chunks[1]);
+
+  if app.input_mode == InputMode::CommandOverlay {
+    let area = centered_rect(92, 55, frame.area());
+    let overlay = Paragraph::new(command_overlay_lines())
+      .block(Block::default().borders(Borders::ALL).title(" Command palette "))
+      .wrap(Wrap { trim: false });
+    frame.render_widget(Clear, area);
+    frame.render_widget(overlay, area);
+  }
 
   let footer = Paragraph::new(footer_line(app));
   frame.render_widget(footer, chunks[2]);
