@@ -8,7 +8,10 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::model::App;
-use crate::{input, model::InputMode};
+use crate::{
+  input,
+  model::{HistogramRow, InputMode, ViewMode},
+};
 
 fn key_style() -> Style {
   Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -74,6 +77,12 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(sep());
       spans.push(Span::styled("v", key_style()));
       spans.push(Span::styled(" fields", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("H", key_style()));
+      spans.push(Span::styled(" histogram", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("y/Y", key_style()));
+      spans.push(Span::styled(" copy lines/hist", label_style()));
       spans.push(sep());
       if tab.folder.is_some() {
         spans.push(Span::styled("F", key_style()));
@@ -251,6 +260,8 @@ fn command_overlay_lines() -> Vec<Line<'static>> {
         ("v", "field menu"),
         ("s", "follow bottom"),
         ("a", "auto refresh"),
+        ("H", "call-site histogram"),
+        ("y/Y", "copy lines/histogram"),
       ],
     ),
     legend("General", &[("? or h", "toggle this overlay"), ("q", "quit")]),
@@ -364,6 +375,54 @@ fn folder_picker_lines(tab: &crate::model::LogTab) -> Vec<Line<'static>> {
   lines
 }
 
+fn histogram_count_style(count: usize, max_count: usize) -> Style {
+  let color = if max_count == 0 {
+    Color::DarkGray
+  } else {
+    let pct = count.saturating_mul(100) / max_count;
+    match pct {
+      80..=100 => Color::Red,
+      55..=79 => Color::Yellow,
+      30..=54 => Color::Green,
+      _ => Color::Cyan,
+    }
+  };
+  Style::default().fg(color).add_modifier(Modifier::BOLD)
+}
+
+fn histogram_lines(rows: &[HistogramRow], width: usize) -> Vec<Line<'static>> {
+  if rows.is_empty() {
+    return vec![Line::from(Span::styled(
+      "No call sites in filtered lines",
+      dim_style(),
+    ))];
+  }
+
+  let max_label = rows.iter().map(|row| row.label.len()).max().unwrap_or(0);
+  let max_count = rows.iter().map(|row| row.count).max().unwrap_or(0);
+  let count_width = max_count.to_string().len().max(1);
+  let bar_width =
+    width.saturating_sub(max_label + count_width + 3).min(40).max(1);
+
+  rows
+    .iter()
+    .map(|row| {
+      let style = histogram_count_style(row.count, max_count);
+      let filled = if max_count == 0 {
+        0
+      } else {
+        (row.count.saturating_mul(bar_width) / max_count).max(1)
+      };
+      Line::from(vec![
+        Span::styled(format!("{:<max_label$} ", row.label), value_style()),
+        Span::styled(format!("{:>count_width$}", row.count), style),
+        Span::styled(" ", dim_style()),
+        Span::styled("█".repeat(filled), style),
+      ])
+    })
+    .collect::<Vec<_>>()
+}
+
 fn recent_picker_lines(app: &App) -> Vec<Line<'static>> {
   if app.recents.is_empty() {
     return vec![Line::from(Span::styled("No recents yet", dim_style()))];
@@ -426,27 +485,43 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 
   let tab = app.current_tab();
   let visible_count = viewport_height.max(1);
-  let current =
-    tab.scroll.offset.min(tab.rendered_lines.len().saturating_sub(1));
+  let view_len = match tab.view_mode {
+    ViewMode::Logs => tab.rendered_lines.len(),
+    ViewMode::CallSiteHistogram => tab.histogram_rows.len(),
+  };
+  let current = tab.scroll.offset.min(view_len.saturating_sub(1));
   let start_idx = current.saturating_sub(visible_count.saturating_sub(1));
-  let end_idx = (start_idx + visible_count).min(tab.rendered_lines.len());
+  let end_idx = (start_idx + visible_count).min(view_len);
 
   let rendered = match app.input_mode {
     InputMode::RecentPicker => recent_picker_lines(app),
     InputMode::FieldMenu => field_menu_lines(tab),
     InputMode::FolderFilePicker => folder_picker_lines(tab),
-    _ => tab.rendered_lines[start_idx..end_idx]
-      .iter()
-      .map(|rl| rl.line.clone())
-      .collect::<Vec<_>>(),
+    _ => match tab.view_mode {
+      ViewMode::Logs => tab.rendered_lines[start_idx..end_idx]
+        .iter()
+        .map(|rl| rl.line.clone())
+        .collect::<Vec<_>>(),
+      ViewMode::CallSiteHistogram => {
+        histogram_lines(&tab.histogram_rows[start_idx..end_idx], viewport_width)
+      }
+    },
   };
 
-  let title = tab
-    .rendered_lines
-    .get(current)
-    .and_then(|line| line.source_file.as_deref())
-    .map(|source_file| format!("{} — {source_file}", tab.name))
-    .unwrap_or_else(|| tab.title());
+  let title = match tab.view_mode {
+    ViewMode::Logs => tab
+      .rendered_lines
+      .get(current)
+      .and_then(|line| line.source_file.as_deref())
+      .map(|source_file| format!("{} — {source_file}", tab.name))
+      .unwrap_or_else(|| tab.title()),
+    ViewMode::CallSiteHistogram => format!(
+      "{} — call-site histogram ({} sites, {} lines)",
+      tab.name,
+      tab.histogram_rows.len(),
+      tab.filtered_indices.len()
+    ),
+  };
 
   let paragraph = Paragraph::new(rendered)
     .block(Block::default().borders(Borders::ALL).title(title))
