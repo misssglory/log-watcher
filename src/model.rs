@@ -200,12 +200,31 @@ pub struct PagingState {
   pub max_lines_per_file: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+  Logs,
+  CallSiteHistogram,
+}
+
+impl Default for ViewMode {
+  fn default() -> Self {
+    Self::Logs
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistogramRow {
+  pub label: String,
+  pub count: usize,
+}
+
 pub struct LogTab {
   pub name: String,
   pub source: TabSource,
   pub entries: Vec<LogEntry>,
   pub filtered_indices: Vec<usize>,
   pub rendered_lines: Vec<RenderedLine>,
+  pub histogram_rows: Vec<HistogramRow>,
   pub last_render_width: usize,
   pub filters: Filters,
   pub delete_preview: DeletePreview,
@@ -213,6 +232,7 @@ pub struct LogTab {
   pub last_update: Instant,
   pub auto_refresh: bool,
   pub pretty_print: bool,
+  pub view_mode: ViewMode,
   pub display: DisplayOptions,
   pub search: SearchState,
   pub folder: Option<FolderState>,

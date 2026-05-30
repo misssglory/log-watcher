@@ -1,4 +1,5 @@
 use std::{
+  io::Write,
   io::{BufRead, BufReader},
   path::PathBuf,
   process::{Command, Stdio},
@@ -13,9 +14,9 @@ use regex::Regex;
 use crate::{
   cache, file_source, filter, highlight,
   model::{
-    App, CommandStream, DeletePreview, DisplayOptions, Filters, InputMode,
-    LogEntry, LogLevel, LogTab, ParsedPrefix, RecentItem, RenderedLine,
-    ScrollState, SearchState, TabSource,
+    App, CommandStream, DeletePreview, DisplayOptions, Filters, HistogramRow,
+    InputMode, LogEntry, LogLevel, LogTab, ParsedPrefix, RecentItem,
+    RenderedLine, ScrollState, SearchState, TabSource, ViewMode,
   },
 };
 
@@ -83,6 +84,7 @@ impl App {
       entries,
       filtered_indices: Vec::new(),
       rendered_lines: Vec::new(),
+      histogram_rows: Vec::new(),
       last_render_width: 0,
       filters: Filters::default(),
       delete_preview: DeletePreview::default(),
@@ -90,6 +92,7 @@ impl App {
       last_update: Instant::now(),
       auto_refresh,
       pretty_print: true,
+      view_mode: ViewMode::Logs,
       display: DisplayOptions::default(),
       search: SearchState::default(),
       folder: None,
@@ -269,6 +272,48 @@ impl App {
     Ok(())
   }
 
+  pub fn toggle_call_site_histogram(&mut self) {
+    let tab = self.current_tab_mut();
+    tab.view_mode = match tab.view_mode {
+      ViewMode::Logs => ViewMode::CallSiteHistogram,
+      ViewMode::CallSiteHistogram => ViewMode::Logs,
+    };
+    tab.scroll.offset = 0;
+    tab.scroll.follow_bottom = false;
+    self.status = match tab.view_mode {
+      ViewMode::Logs => "Showing filtered log lines".into(),
+      ViewMode::CallSiteHistogram => format!(
+        "Showing {} call sites from {} filtered lines",
+        tab.histogram_rows.len(),
+        tab.filtered_indices.len()
+      ),
+    };
+  }
+
+  pub fn copy_filtered_lines_to_clipboard(&mut self) -> Result<()> {
+    let tab = self.current_tab();
+    let lines = tab
+      .filtered_indices
+      .iter()
+      .map(|&idx| tab.entries[idx].raw.as_str())
+      .collect::<Vec<_>>()
+      .join("\n");
+    let count = tab.filtered_indices.len();
+    copy_to_clipboard(lines)?;
+    self.status = format!("Copied {count} filtered lines to clipboard");
+    Ok(())
+  }
+
+  pub fn copy_histogram_to_clipboard(&mut self) -> Result<()> {
+    let tab = self.current_tab();
+    let text = histogram_clipboard_text(&tab.histogram_rows);
+    let count = tab.histogram_rows.len();
+    copy_to_clipboard(text)?;
+    self.status =
+      format!("Copied {count} call-site histogram rows to clipboard");
+    Ok(())
+  }
+
   pub fn toggle_display_field(&mut self, field: char) {
     let tab = self.current_tab_mut();
     let (name, enabled) = match field {
@@ -379,6 +424,8 @@ impl App {
     if tab.last_render_width == width && !tab.rendered_lines.is_empty() {
       return;
     }
+
+    tab.histogram_rows = build_call_site_histogram(tab);
 
     let mut lines = Vec::<RenderedLine>::new();
 
@@ -521,6 +568,86 @@ impl App {
 
     self.status = "No matches".into();
   }
+}
+
+pub fn build_call_site_histogram(tab: &LogTab) -> Vec<HistogramRow> {
+  use std::collections::BTreeMap;
+
+  let mut counts = BTreeMap::<String, usize>::new();
+  for &idx in &tab.filtered_indices {
+    let entry = &tab.entries[idx];
+    if let Some(label) = call_site_label(entry) {
+      *counts.entry(label).or_insert(0) += 1;
+    }
+  }
+
+  let mut rows = counts
+    .into_iter()
+    .map(|(label, count)| HistogramRow { label, count })
+    .collect::<Vec<_>>();
+  rows
+    .sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.label.cmp(&b.label)));
+  rows
+}
+
+fn call_site_label(entry: &LogEntry) -> Option<String> {
+  if let Some(target) = entry.parsed.target.as_deref() {
+    let leaf = target.rsplit("::").next().unwrap_or(target);
+    return match entry.parsed.file_line {
+      Some(line) => Some(format!("{leaf}:{line}")),
+      None => Some(leaf.to_string()),
+    };
+  }
+
+  let file = entry.parsed.file.as_deref()?;
+  match entry.parsed.file_line {
+    Some(line) => Some(format!("{file}:{line}")),
+    None => Some(file.to_string()),
+  }
+}
+
+pub fn histogram_clipboard_text(rows: &[HistogramRow]) -> String {
+  rows
+    .iter()
+    .map(|row| format!("{} {}", row.label, row.count))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+fn copy_to_clipboard(text: String) -> Result<()> {
+  let commands: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
+    &[("pbcopy", &[])]
+  } else if cfg!(target_os = "windows") {
+    &[("clip.exe", &[])]
+  } else {
+    &[
+      ("wl-copy", &[]),
+      ("xclip", &["-selection", "clipboard"]),
+      ("xsel", &["--clipboard", "--input"]),
+    ]
+  };
+
+  let mut last_error = None;
+  for (program, args) in commands {
+    match Command::new(program).args(*args).stdin(Stdio::piped()).spawn() {
+      Ok(mut child) => {
+        if let Some(mut stdin) = child.stdin.take() {
+          stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if status.success() {
+          return Ok(());
+        }
+        last_error = Some(anyhow::anyhow!("{program} exited with {status}"));
+      }
+      Err(err) => last_error = Some(err.into()),
+    }
+  }
+
+  Err(
+    last_error
+      .unwrap_or_else(|| anyhow::anyhow!("no clipboard command available")),
+  )
 }
 
 fn stream_reader<R>(reader: R, tx: mpsc::Sender<String>, level: LogLevel)
@@ -900,5 +1027,17 @@ mod tests {
     assert_eq!(parsed.thread_id.as_deref(), Some("ThreadId(14)"));
     assert!(parsed.message.starts_with("resolved PoolKey "));
     assert!(parsed.message.contains(r#""pool_id":"0xe500""#));
+  }
+
+  #[test]
+  fn formats_call_site_labels_and_histogram_clipboard_text() {
+    let entry = build_entry(
+      "2026-05-30T13:33:23.601120Z INFO crate_name::main: main.rs:55: hello",
+      None,
+    );
+    assert_eq!(call_site_label(&entry).as_deref(), Some("main:55"));
+
+    let rows = vec![HistogramRow { label: "main:55".into(), count: 123 }];
+    assert_eq!(histogram_clipboard_text(&rows), "main:55 123");
   }
 }

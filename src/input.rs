@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
   file_source, filter,
-  model::{App, InputMode, LogLevel, RecentItem},
+  model::{App, InputMode, LogLevel, RecentItem, ViewMode},
 };
 
 fn prev_char_boundary(s: &str, idx: usize) -> usize {
@@ -185,6 +185,20 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
   }
 }
 
+fn current_view_len(app: &App) -> usize {
+  let tab = app.current_tab();
+  match tab.view_mode {
+    ViewMode::Logs => tab.rendered_lines.len(),
+    ViewMode::CallSiteHistogram => tab.histogram_rows.len(),
+  }
+}
+
+fn handle_clipboard_result(app: &mut App, result: Result<()>) {
+  if let Err(err) = result {
+    app.status = format!("Clipboard failed: {err}");
+  }
+}
+
 fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
   match key.code {
     KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
@@ -194,7 +208,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
         (app.selected_tab + app.tabs.len() - 1) % app.tabs.len()
     }
     KeyCode::Down | KeyCode::Char('j') => {
-      let len = app.current_tab().rendered_lines.len();
+      let len = current_view_len(app);
       let tab = app.current_tab_mut();
       tab.scroll.offset = (tab.scroll.offset + 1).min(len.saturating_sub(1));
       tab.scroll.follow_bottom = false;
@@ -205,7 +219,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.scroll.follow_bottom = false;
     }
     KeyCode::PageDown | KeyCode::Char('f') => {
-      let len = app.current_tab().rendered_lines.len();
+      let len = current_view_len(app);
       let tab = app.current_tab_mut();
       tab.scroll.offset = (tab.scroll.offset + 20).min(len.saturating_sub(1));
       tab.scroll.follow_bottom = false;
@@ -221,7 +235,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.scroll.follow_bottom = false;
     }
     KeyCode::End | KeyCode::Char('G') => {
-      let len = app.current_tab().rendered_lines.len();
+      let len = current_view_len(app);
       let tab = app.current_tab_mut();
       tab.scroll.offset = len.saturating_sub(1);
       tab.scroll.follow_bottom = true;
@@ -239,6 +253,17 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
       tab.pretty_print = !tab.pretty_print;
       tab.rendered_lines.clear();
       app.status = format!("Pretty print: {}", tab.pretty_print);
+    }
+    KeyCode::Char('H') => {
+      app.toggle_call_site_histogram();
+    }
+    KeyCode::Char('y') => {
+      let result = app.copy_filtered_lines_to_clipboard();
+      handle_clipboard_result(app, result);
+    }
+    KeyCode::Char('Y') => {
+      let result = app.copy_histogram_to_clipboard();
+      handle_clipboard_result(app, result);
     }
     KeyCode::Char('r') => app.refresh_current()?,
     KeyCode::Char('R') => app.refresh_all()?,
