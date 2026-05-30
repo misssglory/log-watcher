@@ -1,9 +1,11 @@
+use std::path::PathBuf;
+
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::{
   file_source, filter,
-  model::{App, InputMode, LogLevel},
+  model::{App, InputMode, LogLevel, RecentItem},
 };
 
 fn prev_char_boundary(s: &str, idx: usize) -> usize {
@@ -174,6 +176,9 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     InputMode::SearchRegex => handle_search_input(app, key),
     InputMode::ConfirmDelete => handle_confirm_delete(app, key),
     InputMode::JumpToLine => handle_jump_input(app, key),
+    InputMode::OpenFile => handle_open_file_input(app, key),
+    InputMode::OpenCommand => handle_open_command_input(app, key),
+    InputMode::RecentPicker => handle_recent_picker(app, key),
     InputMode::Help => {
       app.input_mode = InputMode::Normal;
       Ok(())
@@ -238,6 +243,22 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Result<()> {
     }
     KeyCode::Char('r') => app.refresh_current()?,
     KeyCode::Char('R') => app.refresh_all()?,
+    KeyCode::Char('o') => {
+      app.input_buffer.clear();
+      app.input_cursor = 0;
+      app.input_mode = InputMode::OpenFile;
+      app.status = "Open file: type a path, then Enter".into();
+    }
+    KeyCode::Char('!') => {
+      app.input_buffer.clear();
+      app.input_cursor = 0;
+      app.input_mode = InputMode::OpenCommand;
+      app.status = "Open command: type a shell command, then Enter".into();
+    }
+    KeyCode::Char('O') => {
+      app.recent_selected = 0;
+      app.input_mode = InputMode::RecentPicker;
+    }
     KeyCode::Char('/') => {
       app.input_buffer.clear();
       app.input_cursor = 0;
@@ -413,5 +434,81 @@ fn jump_to_real_line(app: &mut App, target: usize) {
     app.status = format!("Line {} is after end of file", target);
   } else {
     app.status = "No visible lines".into();
+  }
+}
+
+fn handle_open_file_input(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc => app.input_mode = InputMode::Normal,
+    KeyCode::Enter => {
+      let path = app.input_buffer.trim();
+      if path.is_empty() {
+        app.status = "No file path entered".into();
+      } else {
+        app.open_file_tab(PathBuf::from(path))?;
+      }
+      app.input_mode = InputMode::Normal;
+    }
+    _ => {
+      handle_text_edit(app, key);
+    }
+  }
+  Ok(())
+}
+
+fn handle_open_command_input(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc => app.input_mode = InputMode::Normal,
+    KeyCode::Enter => {
+      let command = app.input_buffer.trim().to_string();
+      if command.is_empty() {
+        app.status = "No command entered".into();
+      } else {
+        app.open_command_tab(command)?;
+      }
+      app.input_mode = InputMode::Normal;
+    }
+    _ => {
+      handle_text_edit(app, key);
+    }
+  }
+  Ok(())
+}
+
+fn handle_recent_picker(app: &mut App, key: KeyEvent) -> Result<()> {
+  match key.code {
+    KeyCode::Esc => app.input_mode = InputMode::Normal,
+    KeyCode::Down | KeyCode::Char('j') => {
+      if !app.recents.is_empty() {
+        app.recent_selected =
+          (app.recent_selected + 1).min(app.recents.len() - 1);
+      }
+    }
+    KeyCode::Up | KeyCode::Char('k') => {
+      app.recent_selected = app.recent_selected.saturating_sub(1);
+    }
+    KeyCode::Enter => {
+      app.open_recent_selected()?;
+      app.input_mode = InputMode::Normal;
+    }
+    KeyCode::Char('d') => {
+      if app.recent_selected < app.recents.len() {
+        app.recents.remove(app.recent_selected);
+        app.recent_selected =
+          app.recent_selected.min(app.recents.len().saturating_sub(1));
+        if let Err(err) = crate::cache::save_recents(&app.recents) {
+          app.status = format!("Failed to save recents: {err}");
+        }
+      }
+    }
+    _ => {}
+  }
+  Ok(())
+}
+
+pub fn recent_label(item: &RecentItem) -> String {
+  match item {
+    RecentItem::File(path) => format!("file {}", path.display()),
+    RecentItem::Command(command) => format!("cmd  {command}"),
   }
 }

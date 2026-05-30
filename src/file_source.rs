@@ -1,18 +1,30 @@
 use std::{fs, time::Instant};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
-use crate::{app::build_entry, filter, model::LogTab};
+use crate::{
+  app::build_entry,
+  filter,
+  model::{LogTab, TabSource},
+};
 
 pub fn has_file_changed(tab: &LogTab) -> Result<bool> {
-  let meta = fs::metadata(&tab.path)?;
+  let TabSource::File(path) = &tab.source else {
+    return Ok(false);
+  };
+
+  let meta = fs::metadata(path)?;
   let modified = meta.modified()?;
   let elapsed = modified.elapsed().unwrap_or_default();
   Ok(elapsed.as_millis() < 500)
 }
 
 pub fn reload_tab(tab: &mut LogTab) -> Result<()> {
-  let content = fs::read_to_string(&tab.path)?;
+  let TabSource::File(path) = &tab.source else {
+    return Ok(());
+  };
+
+  let content = fs::read_to_string(path)?;
   tab.entries = content.lines().map(build_entry).collect();
   tab.last_update = Instant::now();
   filter::recompute_tab(tab);
@@ -31,7 +43,11 @@ pub fn delete_matching_lines(tab: &mut LogTab) -> Result<usize> {
     return Ok(0);
   };
 
-  let content = fs::read_to_string(&tab.path)?;
+  let TabSource::File(path) = &tab.source else {
+    bail!("delete is only supported for file tabs");
+  };
+
+  let content = fs::read_to_string(path)?;
   let lines: Vec<&str> = content.lines().collect();
 
   let deleted = lines.iter().filter(|line| re.is_match(line)).count();
@@ -42,9 +58,9 @@ pub fn delete_matching_lines(tab: &mut LogTab) -> Result<usize> {
     .collect::<Vec<_>>()
     .join("\n");
 
-  let backup = tab.path.with_extension("bak");
+  let backup = path.with_extension("bak");
   fs::write(&backup, content)?;
-  fs::write(&tab.path, kept)?;
+  fs::write(path, kept)?;
   reload_tab(tab)?;
   Ok(deleted)
 }
