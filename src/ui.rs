@@ -5,12 +5,12 @@ use ratatui::{
   widgets::{Block, Borders, Clear, Paragraph, Tabs, Wrap},
   Frame,
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::model::App;
 use crate::{
   input,
-  model::{HistogramRow, InputMode, ViewMode},
+  model::{HistogramRow, InputMode, RecentItem, ViewMode},
 };
 
 fn key_style() -> Style {
@@ -41,7 +41,6 @@ fn is_input_mode(mode: InputMode) -> bool {
       | InputMode::SearchRegex
       | InputMode::JumpToLine
       | InputMode::OpenFile
-      | InputMode::OpenCommand
   )
 }
 
@@ -131,8 +130,7 @@ fn footer_line(app: &App) -> Line<'static> {
     | InputMode::DeleteRegex
     | InputMode::SearchRegex
     | InputMode::JumpToLine
-    | InputMode::OpenFile
-    | InputMode::OpenCommand => {
+    | InputMode::OpenFile => {
       spans.push(Span::styled(input_prefix(app.input_mode), key_style()));
       spans.push(Span::styled(app.input_buffer.clone(), value_style()));
       spans.push(sep());
@@ -156,7 +154,7 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(Span::styled(" pick recent", label_style()));
       spans.push(sep());
       spans.push(Span::styled("Enter", key_style()));
-      spans.push(Span::styled(" open", label_style()));
+      spans.push(Span::styled(" open/edit", label_style()));
       spans.push(sep());
       spans.push(Span::styled("d", key_style()));
       spans.push(Span::styled(" remove", label_style()));
@@ -183,6 +181,19 @@ fn footer_line(app: &App) -> Line<'static> {
       spans.push(sep());
       spans.push(Span::styled("Esc", key_style()));
       spans.push(Span::styled(" close", label_style()));
+    }
+    InputMode::OpenCommand => {
+      spans.push(Span::styled("Enter", key_style()));
+      spans.push(Span::styled(" run", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Esc", key_style()));
+      spans.push(Span::styled(" cancel", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Ctrl/Alt+←/→", key_style()));
+      spans.push(Span::styled(" jump words", label_style()));
+      spans.push(sep());
+      spans.push(Span::styled("Ctrl/Alt+Backspace/Delete", key_style()));
+      spans.push(Span::styled(" delete words", label_style()));
     }
     InputMode::CommandOverlay => {
       spans.push(Span::styled("Command overlay", key_style()));
@@ -375,6 +386,115 @@ fn folder_picker_lines(tab: &crate::model::LogTab) -> Vec<Line<'static>> {
   lines
 }
 
+fn char_width(c: char) -> usize {
+  UnicodeWidthChar::width(c).unwrap_or(0).max(1)
+}
+
+fn wrapped_shell_lines(
+  command: &str,
+  width: usize,
+  first_prefix: &str,
+  continuation_prefix: &str,
+  style: Style,
+) -> Vec<Line<'static>> {
+  let width = width.max(1);
+  let mut lines = Vec::new();
+  let mut line = String::new();
+  let mut line_width = 0usize;
+  let mut prefix = first_prefix;
+
+  for ch in command.chars() {
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let max_content_width = width.saturating_sub(prefix_width).max(1);
+    let ch_width = char_width(ch);
+    if line_width > 0 && line_width + ch_width > max_content_width {
+      lines.push(Line::from(vec![
+        Span::styled(prefix.to_string(), key_style()),
+        Span::styled(line, style),
+      ]));
+      line = String::new();
+      line_width = 0;
+      prefix = continuation_prefix;
+    }
+    line.push(ch);
+    line_width += ch_width;
+  }
+
+  lines.push(Line::from(vec![
+    Span::styled(prefix.to_string(), key_style()),
+    Span::styled(line, style),
+  ]));
+  lines
+}
+
+fn command_editor_lines(
+  command: &str,
+  cursor: usize,
+  width: usize,
+) -> (Vec<Line<'static>>, u16, u16) {
+  let width = width.max(1);
+  let mut lines = Vec::new();
+  let mut line = String::new();
+  let mut line_width = 0usize;
+  let mut prefix = "$ ";
+  let mut cursor_pos = None;
+  let mut line_idx = 0usize;
+
+  for (byte_idx, ch) in command.char_indices() {
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let max_content_width = width.saturating_sub(prefix_width).max(1);
+    let ch_width = char_width(ch);
+    if line_width > 0 && line_width + ch_width > max_content_width {
+      lines.push(Line::from(vec![
+        Span::styled(prefix.to_string(), key_style()),
+        Span::styled(line, value_style()),
+      ]));
+      line = String::new();
+      line_width = 0;
+      prefix = "> ";
+      line_idx += 1;
+    }
+
+    if byte_idx == cursor {
+      cursor_pos =
+        Some((UnicodeWidthStr::width(prefix) + line_width, line_idx));
+    }
+
+    line.push(ch);
+    line_width += ch_width;
+  }
+
+  if cursor_pos.is_none() {
+    cursor_pos = Some((UnicodeWidthStr::width(prefix) + line_width, line_idx));
+  }
+
+  lines.push(Line::from(vec![
+    Span::styled(prefix.to_string(), key_style()),
+    Span::styled(line, value_style()),
+  ]));
+
+  let (x, y) = cursor_pos.unwrap_or((0, 0));
+  (lines, x as u16, y as u16)
+}
+
+fn command_input_overlay(
+  app: &App,
+  width: usize,
+) -> (Vec<Line<'static>>, u16, u16) {
+  let editor_width = width.max(1);
+  let (mut lines, cursor_x, cursor_y) =
+    command_editor_lines(&app.input_buffer, app.input_cursor, editor_width);
+  lines.insert(
+    0,
+    Line::from(Span::styled(
+      "Shell command",
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )),
+  );
+  lines.insert(1, Line::from(""));
+  (lines, cursor_x, cursor_y + 2)
+}
+
 fn histogram_count_style(count: usize, max_count: usize) -> Style {
   let color = if max_count == 0 {
     Color::DarkGray
@@ -423,28 +543,40 @@ fn histogram_lines(rows: &[HistogramRow], width: usize) -> Vec<Line<'static>> {
     .collect::<Vec<_>>()
 }
 
-fn recent_picker_lines(app: &App) -> Vec<Line<'static>> {
+fn recent_picker_lines(app: &App, width: usize) -> Vec<Line<'static>> {
   if app.recents.is_empty() {
     return vec![Line::from(Span::styled("No recents yet", dim_style()))];
   }
 
-  app
-    .recents
-    .iter()
-    .enumerate()
-    .map(|(idx, item)| {
-      let marker = if idx == app.recent_selected { "> " } else { "  " };
-      let style = if idx == app.recent_selected {
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-      } else {
-        value_style()
-      };
-      Line::from(vec![
+  let mut lines = Vec::new();
+  for (idx, item) in app.recents.iter().enumerate() {
+    let marker = if idx == app.recent_selected { "> " } else { "  " };
+    let style = if idx == app.recent_selected {
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+      value_style()
+    };
+
+    match item {
+      RecentItem::Command(command) => {
+        let first_prefix = format!("{marker}cmd    $ ");
+        let continuation_prefix =
+          format!("{}       > ", " ".repeat(marker.len()));
+        lines.extend(wrapped_shell_lines(
+          command,
+          width,
+          &first_prefix,
+          &continuation_prefix,
+          style,
+        ));
+      }
+      _ => lines.push(Line::from(vec![
         Span::styled(marker, key_style()),
         Span::styled(input::recent_label(item), style),
-      ])
-    })
-    .collect::<Vec<_>>()
+      ])),
+    }
+  }
+  lines
 }
 
 pub fn render(frame: &mut Frame, app: &mut App) {
@@ -494,7 +626,7 @@ pub fn render(frame: &mut Frame, app: &mut App) {
   let end_idx = (start_idx + visible_count).min(view_len);
 
   let rendered = match app.input_mode {
-    InputMode::RecentPicker => recent_picker_lines(app),
+    InputMode::RecentPicker => recent_picker_lines(app, viewport_width),
     InputMode::FieldMenu => field_menu_lines(tab),
     InputMode::FolderFilePicker => folder_picker_lines(tab),
     _ => match tab.view_mode {
@@ -538,10 +670,25 @@ pub fn render(frame: &mut Frame, app: &mut App) {
     frame.render_widget(overlay, area);
   }
 
+  let mut command_cursor = None;
+  if app.input_mode == InputMode::OpenCommand {
+    let area = centered_rect(86, 35, frame.area());
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let (lines, cursor_x, cursor_y) = command_input_overlay(app, inner_width);
+    let overlay = Paragraph::new(lines)
+      .block(Block::default().borders(Borders::ALL).title(" Command "))
+      .wrap(Wrap { trim: false });
+    frame.render_widget(Clear, area);
+    frame.render_widget(overlay, area);
+    command_cursor = Some((area.x + 1 + cursor_x, area.y + 1 + cursor_y));
+  }
+
   let footer = Paragraph::new(footer_line(app));
   frame.render_widget(footer, chunks[2]);
 
-  if is_input_mode(app.input_mode) {
+  if let Some(cursor) = command_cursor {
+    frame.set_cursor_position(cursor);
+  } else if is_input_mode(app.input_mode) {
     let prefix = input_prefix(app.input_mode);
     let prefix_width = UnicodeWidthStr::width(prefix) as u16;
     let cursor_width =
