@@ -114,11 +114,15 @@ fn move_word_right(app: &mut App) {
 
 fn handle_text_edit(app: &mut App, key: KeyEvent) -> bool {
   match (key.code, key.modifiers) {
-    (KeyCode::Left, m) if m.contains(KeyModifiers::CONTROL) => {
+    (KeyCode::Left, m)
+      if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) =>
+    {
       move_word_left(app);
       true
     }
-    (KeyCode::Right, m) if m.contains(KeyModifiers::CONTROL) => {
+    (KeyCode::Right, m)
+      if m.contains(KeyModifiers::CONTROL) || m.contains(KeyModifiers::ALT) =>
+    {
       move_word_right(app);
       true
     }
@@ -132,14 +136,16 @@ fn handle_text_edit(app: &mut App, key: KeyEvent) -> bool {
     }
     (KeyCode::Backspace, m)
       if m.contains(KeyModifiers::SHIFT)
-        || m.contains(KeyModifiers::CONTROL) =>
+        || m.contains(KeyModifiers::CONTROL)
+        || m.contains(KeyModifiers::ALT) =>
     {
       delete_prev_word(app);
       true
     }
     (KeyCode::Delete, m)
       if m.contains(KeyModifiers::SHIFT)
-        || m.contains(KeyModifiers::CONTROL) =>
+        || m.contains(KeyModifiers::CONTROL)
+        || m.contains(KeyModifiers::ALT) =>
     {
       delete_next_word(app);
       true
@@ -545,8 +551,17 @@ fn handle_recent_picker(app: &mut App, key: KeyEvent) -> Result<()> {
       app.recent_selected = app.recent_selected.saturating_sub(1);
     }
     KeyCode::Enter => {
-      app.open_recent_selected()?;
-      app.input_mode = InputMode::Normal;
+      if let Some(RecentItem::Command(command)) =
+        app.recents.get(app.recent_selected).cloned()
+      {
+        app.input_buffer = command;
+        app.input_cursor = app.input_buffer.len();
+        app.input_mode = InputMode::OpenCommand;
+        app.status = "Edit command from history, then Enter".into();
+      } else {
+        app.open_recent_selected()?;
+        app.input_mode = InputMode::Normal;
+      }
     }
     KeyCode::Char('d') if app.recent_selected < app.recents.len() => {
       app.recents.remove(app.recent_selected);
